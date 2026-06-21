@@ -1,0 +1,9 @@
+{
+"enabled": true,
+"autoStart": "On",
+"link": "https://app.hawktrk.com/sl?id=6a2050db46d3cf0d62f32aa4&pid=2&sub2=u787576&sub6=s2smartLink&sub5=s1SUBID1HERE",
+"image": "https://dnm.nflximg.net/api/v6/BvVbc2Wxr2w6QuoANoSpJKEIWjQ/AAAAQZaqK58r2P5FnkOQKX7aTtT5GB41Q9Vn6xOOhOH_XF2uYgP6Vnh2d1s0ITPc9yN_DuIz1hgOpi7XwfiP3kjD9SdD5ctAj9_eFO5gIWAo-mzCDFJvUfmFOU2iXdhGPedHPIwGyNarwSQB_tsHyMbL_7Hfhxk.jpg?r=007",
+ "ctaText": "GET IT NOW",
+"closeAfter": 6,
+"urgencySeconds": 600
+}
