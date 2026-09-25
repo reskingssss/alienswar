@@ -7,9 +7,9 @@ declare(strict_types=1);
 
 // ---- database (Hostinger: hPanel -> Databases -> MySQL) ----------------
 const DB_HOST = 'localhost';
-const DB_NAME = 'u763428116_tool';
-const DB_USER = 'u763428116_tool';
-const DB_PASS = 'Tahiri@123Tahiri@123';
+const DB_NAME = 'your_database_name';
+const DB_USER = 'your_database_user';
+const DB_PASS = 'CHANGE_ME';   // never commit the real password
 
 // ---- site -------------------------------------------------------------
 const SITE_NAME  = 'MavelyLink';
