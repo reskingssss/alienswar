@@ -20,6 +20,9 @@ function admin_nav(): array
                          // v7.0.0: server-controlled Python tabs. The title is
                          // the one the brief specifies, character for character.
                          ['tabs.php', 'ADD Tabs *Py in Your Tool', 'tabs'],
+                         // v8: remote control of every option, per plan
+                         ['features.php', 'Tool options by plan', 'toggle'],
+                         ['ziplinks.php', 'Control ZIP Links', 'link'],
                          ['update.php', 'App updates', 'up']]],
         ['Website', [['channels.php', 'Contact channels', 'chat'], ['settings.php', 'Settings', 'gear']]],
         ['System', [['logs.php', 'Audit & error logs', 'log'], ['upgrade.php', 'Database', 'db']]],
@@ -48,6 +51,9 @@ function icon(string $name): string
         'tabs'  => '<path d="M3 8h6V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3h6"/><rect x="3" y="8" width="18" height="12" rx="1.5"/><path d="M8 13h8M8 16h5"/>',
         // v6.3: referral programme
         'user'  => '<circle cx="12" cy="8" r="3.5"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>',
+        // v8: tool options by plan, Control ZIP Links
+        'toggle' => '<rect x="2.5" y="7" width="19" height="10" rx="5"/><circle cx="16.5" cy="12" r="3"/>',
+        'link'  => '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
         'share' => '<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.2 10.8l7.6-3.6M8.2 13.2l7.6 3.6"/>',
     ][$name] ?? '<circle cx="12" cy="12" r="8"/>';
     return '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' . $p . '</svg>';

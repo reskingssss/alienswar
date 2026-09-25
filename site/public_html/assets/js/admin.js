@@ -110,3 +110,48 @@
     });
   });
 })();
+
+// ---- v8: Tool options by plan (quick buttons + unsaved-changes guard) ----
+(function () {
+  'use strict';
+  var form = document.getElementById('gates-form');
+  if (!form) { return; }
+  var dirty = document.getElementById('tm-dirty');
+  function mark() { if (dirty) { dirty.hidden = false; } form.dataset.dirty = '1'; }
+  form.addEventListener('change', mark);
+  form.querySelectorAll('[data-bulk]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var card = b.closest('.tm-card');
+      var mode = b.getAttribute('data-bulk');
+      card.querySelectorAll('.tm-row input[type=checkbox]').forEach(function (cb) {
+        var tier = cb.name.slice(cb.name.lastIndexOf('[') + 1, -1);
+        cb.checked = mode === 'all' ? true : (mode === 'paid' ? tier !== 'free' : tier === 'team');
+      });
+      mark();
+    });
+  });
+  window.addEventListener('beforeunload', function (e) {
+    if (form.dataset.dirty === '1' && !form.dataset.submitting) { e.preventDefault(); e.returnValue = ''; }
+  });
+  form.addEventListener('submit', function () { form.dataset.submitting = '1'; });
+})();
+
+// ---- v8: Control ZIP Links (one list for every plan) --------------------
+(function () {
+  'use strict';
+  var same = document.getElementById('zl-same');
+  if (!same) { return; }
+  function sync() {
+    document.querySelectorAll('[data-zl-per]').forEach(function (el) { el.hidden = same.checked; });
+    document.querySelectorAll('[data-zl-all]').forEach(function (el) { el.hidden = !same.checked; });
+  }
+  same.addEventListener('change', sync);
+  sync();
+  var master = document.getElementById('zl-enabled');
+  var body = document.getElementById('zl-body');
+  if (master && body) {
+    var m = function () { body.classList.toggle('is-off', !master.checked); };
+    master.addEventListener('change', m);
+    m();
+  }
+})();

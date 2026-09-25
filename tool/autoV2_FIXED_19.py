@@ -26141,6 +26141,22 @@ def _v20_var_guard(self, attr, value, option_id):
                     v.set(want)
                 finally:
                     v._v20_busy = False
+
+                # Tcl suspends every trace of a variable while one of them
+                # runs, so the widgets bound to it missed the write above:
+                # write it once more outside the trace to redraw them.
+                def _refresh(vv=v, val=want):
+                    vv._v20_busy = True
+                    try:
+                        vv.set(val)
+                    except Exception:
+                        pass
+                    finally:
+                        vv._v20_busy = False
+                try:
+                    self.root.after_idle(_refresh)
+                except Exception:
+                    pass
                 if getattr(self, '_v20_ready', False):
                     _v20_locked_popup(self, oid)
         try:
