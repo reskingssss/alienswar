@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------
+# Security + performance. Works on Hostinger (LiteSpeed/Apache).
+# ---------------------------------------------------------------
+Options -Indexes
+ServerSignature Off
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  # PayPal SDK is the only third-party script allowed
+  Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.paypal.com https://www.sandbox.paypal.com https://*.paypal.com https://www.paypalobjects.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.paypalobjects.com https://*.paypal.com; connect-src 'self' https://www.paypal.com https://www.sandbox.paypal.com https://*.paypal.com; frame-src https://www.paypal.com https://www.sandbox.paypal.com https://*.paypal.com; base-uri 'self'; form-action 'self'; frame-ancestors 'self'; object-src 'none'"
+  Header unset X-Powered-By
+</IfModule>
+
+# force https
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} !=on
+  RewriteCond %{HTTP:X-Forwarded-Proto} !https
+  RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
+</IfModule>
+
+# serve robots.txt and sitemap.xml from the domain-aware PHP generators, so
+# the URLs they contain match whatever domain this is deployed on
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule ^robots\.txt$   robots.php   [L]
+  RewriteRule ^sitemap\.xml$  sitemap.php  [L]
+  # v6.3.1: short invite links. Public, anonymous, GET only. r.php redirects
+  # to /?ref=CODE, which is the canonical link the server gives the tool.
+  RewriteRule ^r/([A-Za-z0-9]{4,16})/?$  r.php?ref=$1  [L,QSA]
+</IfModule>
+
+# never serve config, sql, logs, lock files or dotfiles
+<FilesMatch "(^\.|\.(sql|log|md|ini|bak|old|sh|lock)$|^config\.php$)">
+  Require all denied
+</FilesMatch>
+
+# the includes folder is library code only
+RedirectMatch 404 ^/includes/
+
+# pass the bearer token through to PHP (some hosts strip it)
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+</IfModule>
+
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/css text/plain text/xml application/javascript application/json
+</IfModule>
+
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/css "access plus 30 days"
+  ExpiresByType application/javascript "access plus 30 days"
+  ExpiresByType image/svg+xml "access plus 30 days"
+  ExpiresByType image/png "access plus 30 days"
+  ExpiresDefault "access plus 2 days"
+</IfModule>
+
+ErrorDocument 404 /404.php

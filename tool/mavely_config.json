@@ -1,0 +1,4 @@
+{
+  "_comment": "OPTIONAL. Rename to mavely_config.json and place NEXT TO the desktop EXE to point it at a different domain WITHOUT rebuilding. If absent, the built-in default in license_client.py is used. You can also set the MAVELYLINK_API_BASE environment variable instead.",
+  "api_base": "https://mavlink.click/"
+}

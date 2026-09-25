@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------
+# The installer and key generator must be reachable to set the site up,
+# so this folder is NOT blocked wholesale (a blanket "Require all denied"
+# here is what caused the 403 on install.php / keygen.php).
+#
+# Only the sensitive files are denied. install.php locks itself after the
+# first successful run, but you should still DELETE THIS WHOLE FOLDER once
+# setup is finished.
+# ---------------------------------------------------------------------
+Options -Indexes
+
+# never hand out the schema, the lock file, notes or backups
+<FilesMatch "\.(sql|lock|md|bak|old|log|ini|json)$">
+  Require all denied
+</FilesMatch>
+
+# allow only the two setup scripts to be executed; nothing else in here
+<FilesMatch "^(install|keygen)\.php$">
+  Require all granted
+</FilesMatch>

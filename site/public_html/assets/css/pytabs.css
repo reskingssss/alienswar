@@ -1,0 +1,109 @@
+/* MavelyLink admin — ADD Tabs *Py in Your Tool (v7.0.0)
+   A separate stylesheet so admin.css is not touched. Everything here is
+   scoped to the new page's own classes and cannot affect any other screen.
+   Colour tokens come from admin.css :root, so this follows the same theme. */
+
+/* ---------- header action cluster ---------- */
+.head-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.head-actions form{margin:0}
+
+/* ---------- drag-to-reorder ---------- */
+#tab-table tr[draggable="true"]{cursor:default}
+#tab-table td.drag-cell{cursor:grab;color:var(--muted);font-size:1.1rem;
+  text-align:center;user-select:none;letter-spacing:-2px}
+#tab-table tr.dragging{opacity:.4}
+#tab-table tr.drop-before td{box-shadow:inset 0 3px 0 0 var(--brand)}
+#tab-table tr.drop-after td{box-shadow:inset 0 -3px 0 0 var(--brand)}
+
+/* ---------- Python editor with syntax highlighting ----------
+   The classic underlay technique: a <pre> paints the coloured tokens and a
+   transparent <textarea> sits exactly on top of it holding the real text and
+   the caret. Both must share every metric or the caret drifts, which is why
+   font, size, line-height, padding, border and white-space are declared once
+   for both. With JavaScript off the textarea is simply a normal code box —
+   the underlay stays empty and nothing breaks. */
+.code-wrap{position:relative;border-radius:var(--radius-sm);overflow:hidden;
+  background:#0f1a2e;border:1px solid #0f1a2e;margin:0 0 6px}
+.code-wrap .code-underlay,
+.code-wrap textarea.code{
+  margin:0;
+  padding:12px 14px;
+  border:0;
+  font-family:var(--mono);
+  font-size:.84rem;
+  line-height:1.45;
+  tab-size:4;
+  white-space:pre;
+  word-wrap:normal;
+  overflow-wrap:normal;
+  letter-spacing:0;
+}
+.code-wrap .code-underlay{
+  position:absolute;inset:0;
+  overflow:auto;
+  color:#dfe7f5;
+  background:#0f1a2e;
+  pointer-events:none;
+  z-index:0;
+}
+.code-wrap textarea.code{
+  position:relative;
+  z-index:1;
+  display:block;
+  width:100%;
+  min-height:360px;
+  resize:vertical;
+  background:transparent;
+  color:transparent;
+  caret-color:#dfe7f5;
+  overflow:auto;
+  border-radius:0;
+}
+/* while the underlay is inactive (no JS) the textarea paints its own text */
+.code-wrap:not(.is-lit) textarea.code{color:#dfe7f5}
+.code-wrap textarea.code::selection{background:#2f5fd0;color:#fff}
+.code-wrap textarea.code:focus{outline:2px solid var(--brand);outline-offset:-2px}
+
+/* token colours — chosen for contrast on #0f1a2e, not decoration */
+.code-underlay .t-kw{color:#7fa4f6;font-weight:600}
+.code-underlay .t-bi{color:#6fd3c4}
+.code-underlay .t-str{color:#f0b26b}
+.code-underlay .t-com{color:#7688a6;font-style:italic}
+.code-underlay .t-num{color:#c9a6f5}
+.code-underlay .t-def{color:#f5d76e;font-weight:600}
+.code-underlay .t-dec{color:#e58f8f}
+/* anything the tokenizer is unsure about stays plain #dfe7f5 */
+
+.editor-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.editor-actions .check{margin:0}
+
+/* ---------- size fitter ---------- */
+.fitter{display:grid;grid-template-columns:minmax(240px,340px) minmax(0,1fr);
+  gap:16px;align-items:start;margin:4px 0 10px}
+.fitter-stage{background:var(--paper);border:1px solid var(--line);
+  border-radius:var(--radius-sm);padding:14px;overflow:hidden}
+.fitter-canvas{position:relative;background:#fff;border:2px solid var(--line-2);
+  border-radius:4px;width:100%;aspect-ratio:1024/425}
+/* aspect-ratio is unsupported on very old browsers; this keeps a usable box */
+@supports not (aspect-ratio:1/1){.fitter-canvas{height:130px}}
+.fitter-min{position:absolute;left:0;top:0;border:1px dashed var(--warn);
+  background:rgba(255,243,214,.45)}
+.fitter-script{position:absolute;left:0;top:0;border:2px solid var(--brand);
+  background:rgba(47,95,208,.14)}
+.fitter-script.is-over{border-color:var(--bad);background:rgba(180,35,24,.14)}
+.fitter-tag{position:absolute;left:3px;top:2px;font-size:.62rem;line-height:1.1;
+  color:var(--muted);white-space:nowrap;font-family:var(--mono)}
+.fitter-script .fitter-tag{color:var(--brand-2)}
+.fitter-script.is-over .fitter-tag{color:var(--bad)}
+.fitter-note p{margin:0 0 6px}
+.fitter-note .chip{white-space:normal;text-align:left;line-height:1.35}
+
+@media (max-width:820px){.fitter{grid-template-columns:1fr}}
+
+/* ---------- the AI prompt ---------- */
+.prompt-box{background:#0f1a2e;color:#dfe7f5;border-radius:var(--radius-sm);
+  padding:14px 16px;font-family:var(--mono);font-size:.8rem;line-height:1.5;
+  max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0}
+
+/* ---------- copy button feedback ---------- */
+.btn.is-copied{background:var(--good);border-color:var(--good);color:#fff}
