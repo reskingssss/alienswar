@@ -39,6 +39,12 @@ try:
 except Exception:
     _license = None
 
+# v8.0.0: when this tool is embedded in AutoPoster Pro ("Method 2 - Profiles")
+# the host owns ONE LicenseClient for the whole application and sets it here,
+# so the plan, the master switch and the check-in are shared instead of two
+# clients checking in for the same machine. None = standalone (unchanged).
+_SHARED_LICENSE_CLIENT = None
+
 
 # ---------------------------------------------------------------------------
 # v7.0.0  Server-controlled Python tabs. Additive and optional in exactly the
@@ -1830,94 +1836,7 @@ class ChromeProfileGenerator:
             with open(os.path.join(ext_dir, 'loader.js'), 'w', encoding='utf-8') as f:
                 f.write(loader_js)
 
-            # Extract Chrome version from UA
-            ua_string = fingerprint['user_agent']
-            import re as _re
-            m = _re.search(r'Chrome/(\d+)\.(\d+)\.(\d+)\.(\d+)', ua_string)
-            if m:
-                chrome_full = f"{m.group(1)}.{m.group(2)}.{m.group(3)}.{m.group(4)}"
-                chrome_major = m.group(1)
-            else:
-                chrome_full = "135.0.0.0"
-                chrome_major = "135"
-
-            if 'Mac OS X' in ua_string:
-                ch_platform = 'macOS'
-                ch_mobile = False
-            elif 'Linux' in ua_string and 'Android' not in ua_string:
-                ch_platform = 'Linux'
-                ch_mobile = False
-            elif 'Android' in ua_string:
-                ch_platform = 'Android'
-                ch_mobile = True
-            else:
-                ch_platform = 'Windows'
-                ch_mobile = False
-
-            data = {
-                "userAgent": ua_string,
-                "language": fingerprint['language'],
-                "languages": fingerprint.get('languages', [fingerprint['language'], 'en']),
-                "platform": fingerprint['platform'],
-                "hardwareConcurrency": fingerprint['hardware_concurrency'],
-                "deviceMemory": fingerprint['device_memory'],
-                "devicePixelRatio": fingerprint['device_pixel_ratio'],
-                "screen": {
-                    "width": fingerprint['screen_resolution']['width'],
-                    "height": fingerprint['screen_resolution']['height'],
-                    "availWidth": fingerprint['screen_resolution']['width'],
-                    "availHeight": fingerprint['screen_resolution']['height'] - 40,
-                    "colorDepth": fingerprint['color_depth'],
-                    "pixelDepth": fingerprint['color_depth'],
-                },
-                "timezone": fingerprint['timezone'],
-                "webglVendor": fingerprint['webgl_vendor'],
-                "webglRenderer": fingerprint.get('webgl_renderer', 'ANGLE (Generic)'),
-                "webgpu": fingerprint.get('webgpu', {}),
-                "canvasNoise": fingerprint['canvas_hash'],
-                "audioNoise": fingerprint.get('audio_noise', 0.0001),
-                "doNotTrack": fingerprint.get('do_not_track'),
-                "colorScheme": fingerprint.get('color_scheme', 'light'),
-                "motionPreference": fingerprint.get('motion_preference', 'no-preference'),
-                "fonts": fingerprint.get('fonts', []),
-                "plugins": fingerprint.get('plugins', []),
-                "battery": fingerprint.get('battery', {
-                    "charging": True, "chargingTime": 0,
-                    "dischargingTime": float('inf'), "level": 1.0
-                }),
-                "connection": fingerprint.get('connection', {
-                    "effectiveType": "4g", "rtt": 50,
-                    "downlink": 10.0, "saveData": False, "type": "wifi"
-                }),
-                "memory": fingerprint.get('memory', {
-                    "jsHeapSizeLimit": 4294705152,
-                    "totalJSHeapSize": 24000000,
-                    "usedJSHeapSize": 16000000,
-                }),
-                "speechVoices": fingerprint.get('speech_voices', []),
-                "vendor": "Google Inc.",
-                "userAgentData": {
-                    "brands": [
-                        {"brand": "Google Chrome", "version": chrome_major},
-                        {"brand": "Chromium", "version": chrome_major},
-                        {"brand": "Not_A Brand", "version": "24"},
-                    ],
-                    "fullVersionList": [
-                        {"brand": "Google Chrome", "version": chrome_full},
-                        {"brand": "Chromium", "version": chrome_full},
-                        {"brand": "Not_A Brand", "version": "24.0.0.0"},
-                    ],
-                    "mobile": ch_mobile,
-                    "platform": ch_platform,
-                    "platformVersion": "15.0.0" if ch_platform == "Windows" else "10.15.7",
-                    "architecture": "x86",
-                    "bitness": "64",
-                    "model": "",
-                    "wow64": False,
-                },
-            }
-            if data['battery'].get('dischargingTime') == float('inf'):
-                data['battery']['dischargingTime'] = -1
+            data = self._fingerprint_payload(fingerprint)
 
             # v3.3: guarded so the extension copy and the CDP copy of this
             # same script never both apply in one document
@@ -1929,6 +1848,112 @@ class ChromeProfileGenerator:
         except Exception as e:
             print(f"[ext] Failed to build fingerprint extension: {e}")
             return None
+
+    def _fingerprint_payload(self, fingerprint):
+        """The JSON the injection script receives, built from one
+        fingerprint. Factored out of _build_fingerprint_extension (same
+        code, same result) so a Playwright context can use it too."""
+        # Extract Chrome version from UA
+        ua_string = fingerprint['user_agent']
+        import re as _re
+        m = _re.search(r'Chrome/(\d+)\.(\d+)\.(\d+)\.(\d+)', ua_string)
+        if m:
+            chrome_full = f"{m.group(1)}.{m.group(2)}.{m.group(3)}.{m.group(4)}"
+            chrome_major = m.group(1)
+        else:
+            chrome_full = "135.0.0.0"
+            chrome_major = "135"
+
+        if 'Mac OS X' in ua_string:
+            ch_platform = 'macOS'
+            ch_mobile = False
+        elif 'Linux' in ua_string and 'Android' not in ua_string:
+            ch_platform = 'Linux'
+            ch_mobile = False
+        elif 'Android' in ua_string:
+            ch_platform = 'Android'
+            ch_mobile = True
+        else:
+            ch_platform = 'Windows'
+            ch_mobile = False
+
+        data = {
+            "userAgent": ua_string,
+            "language": fingerprint['language'],
+            "languages": fingerprint.get('languages', [fingerprint['language'], 'en']),
+            "platform": fingerprint['platform'],
+            "hardwareConcurrency": fingerprint['hardware_concurrency'],
+            "deviceMemory": fingerprint['device_memory'],
+            "devicePixelRatio": fingerprint['device_pixel_ratio'],
+            "screen": {
+                "width": fingerprint['screen_resolution']['width'],
+                "height": fingerprint['screen_resolution']['height'],
+                "availWidth": fingerprint['screen_resolution']['width'],
+                "availHeight": fingerprint['screen_resolution']['height'] - 40,
+                "colorDepth": fingerprint['color_depth'],
+                "pixelDepth": fingerprint['color_depth'],
+            },
+            "timezone": fingerprint['timezone'],
+            "webglVendor": fingerprint['webgl_vendor'],
+            "webglRenderer": fingerprint.get('webgl_renderer', 'ANGLE (Generic)'),
+            "webgpu": fingerprint.get('webgpu', {}),
+            "canvasNoise": fingerprint['canvas_hash'],
+            "audioNoise": fingerprint.get('audio_noise', 0.0001),
+            "doNotTrack": fingerprint.get('do_not_track'),
+            "colorScheme": fingerprint.get('color_scheme', 'light'),
+            "motionPreference": fingerprint.get('motion_preference', 'no-preference'),
+            "fonts": fingerprint.get('fonts', []),
+            "plugins": fingerprint.get('plugins', []),
+            "battery": fingerprint.get('battery', {
+                "charging": True, "chargingTime": 0,
+                "dischargingTime": float('inf'), "level": 1.0
+            }),
+            "connection": fingerprint.get('connection', {
+                "effectiveType": "4g", "rtt": 50,
+                "downlink": 10.0, "saveData": False, "type": "wifi"
+            }),
+            "memory": fingerprint.get('memory', {
+                "jsHeapSizeLimit": 4294705152,
+                "totalJSHeapSize": 24000000,
+                "usedJSHeapSize": 16000000,
+            }),
+            "speechVoices": fingerprint.get('speech_voices', []),
+            "vendor": "Google Inc.",
+            "userAgentData": {
+                "brands": [
+                    {"brand": "Google Chrome", "version": chrome_major},
+                    {"brand": "Chromium", "version": chrome_major},
+                    {"brand": "Not_A Brand", "version": "24"},
+                ],
+                "fullVersionList": [
+                    {"brand": "Google Chrome", "version": chrome_full},
+                    {"brand": "Chromium", "version": chrome_full},
+                    {"brand": "Not_A Brand", "version": "24.0.0.0"},
+                ],
+                "mobile": ch_mobile,
+                "platform": ch_platform,
+                "platformVersion": "15.0.0" if ch_platform == "Windows" else "10.15.7",
+                "architecture": "x86",
+                "bitness": "64",
+                "model": "",
+                "wow64": False,
+            },
+        }
+        if data['battery'].get('dischargingTime') == float('inf'):
+            data['battery']['dischargingTime'] = -1
+        return data
+
+    def playwright_fingerprint(self, fingerprint):
+        """v8.0.0: (context options, init script) that apply this
+        fingerprint to a Playwright browser context - the same
+        injection script the profile extension runs."""
+        data = self._fingerprint_payload(fingerprint)
+        opts = {'user_agent': fingerprint['user_agent']}
+        if fingerprint.get('timezone'):
+            opts['timezone_id'] = fingerprint['timezone']
+        if fingerprint.get('color_scheme') in ('light', 'dark'):
+            opts['color_scheme'] = fingerprint['color_scheme']
+        return opts, self._fingerprint_inject_js(data)
 
     def _fingerprint_inject_js(self, data):
         """Return the v3 enhanced JS source for fingerprint override."""
@@ -7029,6 +7054,8 @@ if __name__ == '__main__':
         if _license is None:
             return None
         client = getattr(self, '_license_client', None)
+        if client is None and _SHARED_LICENSE_CLIENT is not None:
+            client = self._license_client = _SHARED_LICENSE_CLIENT
         if client is None:
             try:
                 client = _license.LicenseClient()

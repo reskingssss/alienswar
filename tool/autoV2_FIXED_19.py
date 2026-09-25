@@ -24509,7 +24509,3397 @@ if 'freeid' not in [t[0] for t in _TAB_DEF]:
 _UI13_TABS = (('config', 'Configuration', '⚙'), ('auto', 'Mode automatique', '⚡'),
               ('shorts', 'Montage vidéo Shorts', '✂'), ('freeid', 'Free ID', '▢'),
               ('journal', 'Journal', '▤'))
+# >>> V20-BEGIN
+# ======================================================================
+# >>> v20 — AutoPoster Pro 4.0
+#     · performance: cached rendering, batched log, one reusable toast,
+#       adaptive UI pump, trailing-edge relayout
+#     · new compact design system (light + dark)
+#     · Method 2: the Chrome Profile Generator ("Profiles" + "Invite")
+#       merged in, sharing one licence client
+#     · licensing in the top bar (About · plan · Upgrade · Register licence)
+#     · remote control from the website: per-option Free / Pro / Team
+#       gating and Control ZIP Links, both from the signed check-in
+# Same rule as every earlier layer: no application method is edited in
+# place; new behaviour wraps the previous implementation and calls it.
+# Python 3.7 compatible (no walrus, no f-string "=", no builtin generics).
+# ======================================================================
+import threading as _v20_threading
+import collections as _v20_collections
+import base64 as _v20_b64
+import json as _v20_json
+import hashlib as _v20_hashlib
 
+APP_VERSION = '4.0'                 # AutoPoster Pro 4.0 (merged edition)
+_V20_CHECKIN_VERSION = '8.0.0'      # version reported to the licensing site
+_V20_DBG = bool(os.environ.get('AUTOPOSTER_DEBUG'))
+
+
+def _v20_dbg():
+    if _V20_DBG:
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+
+
+# ----------------------------------------------------------------------
+# PART A — performance
+# ----------------------------------------------------------------------
+
+# A.1  Rendered-PNG cache.  _ui_photo() already keeps one PhotoImage per key
+# for the life of the process; the expensive part is the pure-Python SDF
+# rasteriser behind it (0.5–1 s at every start and theme switch).  The PNG
+# bytes are now cached by key in memory AND on disk, so the rasteriser runs
+# once per shape/colour/size ever, not once per start.  The disk format is a
+# plain JSON map {repr(key): base64(png)} - never pickle (a tampered cache
+# file must not be able to run code).
+_V20_PNG_CACHE = {}
+_V20_PNG_DIRTY = [False]
+_V20_PNG_LOCK = _v20_threading.Lock()
+_V20_PNG_FILE_VER = 'v20.1'
+
+
+def _v20_png_cache_path():
+    try:
+        return os.path.join(SESSION_BASE, 'ui_render_cache.json')
+    except Exception:
+        return ''
+
+
+def _v20_png_cache_load():
+    path = _v20_png_cache_path()
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        if os.path.getsize(path) > 24 * 1024 * 1024:
+            return
+        with open(path, 'r', encoding='utf-8') as fh:
+            data = _v20_json.load(fh)
+        if not isinstance(data, dict) or data.get('_ver') != _V20_PNG_FILE_VER:
+            return
+        items = data.get('items') or {}
+        with _V20_PNG_LOCK:
+            for k, v in items.items():
+                if isinstance(k, str) and isinstance(v, str):
+                    try:
+                        raw = _v20_b64.b64decode(v.encode('ascii'))
+                    except Exception:
+                        continue
+                    if raw[:8] == b'\x89PNG\r\n\x1a\n':
+                        _V20_PNG_CACHE[k] = raw
+    except Exception:
+        _v20_dbg()
+
+
+def _v20_png_cache_save():
+    if not _V20_PNG_DIRTY[0]:
+        return
+    path = _v20_png_cache_path()
+    if not path:
+        return
+    try:
+        with _V20_PNG_LOCK:
+            items = dict((k, _v20_b64.b64encode(v).decode('ascii'))
+                         for k, v in list(_V20_PNG_CACHE.items())[-6000:])
+            _V20_PNG_DIRTY[0] = False
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            _v20_json.dump({'_ver': _V20_PNG_FILE_VER, 'items': items}, fh)
+        os.replace(tmp, path)
+    except Exception:
+        _v20_dbg()
+
+
+def _ui_photo(w, key, maker):
+    """Same contract as before (one PhotoImage per interpreter+key); the PNG
+    bytes behind it now come from the render cache when available."""
+    import tkinter as _tk
+    k = (w.tk, key)
+    img = _UI_IMG.get(k)
+    if img is None:
+        skey = repr(key)
+        raw = _V20_PNG_CACHE.get(skey)
+        if raw is None:
+            raw = maker()
+            with _V20_PNG_LOCK:
+                _V20_PNG_CACHE[skey] = raw
+                _V20_PNG_DIRTY[0] = True
+        img = _tk.PhotoImage(master=w, data=_ui_b64.b64encode(raw).decode('ascii'), format='png')
+        _UI_IMG[k] = img
+    return img
+
+
+_v20_png_cache_load()
+
+
+# A.2  Faster PNG encoder for the (now rare) cache misses: rows are packed
+# with one join per row instead of one extend per pixel, and zlib runs at
+# level 6 (same output quality - PNG is lossless - far less CPU than 9).
+def _ui_png(w, h, px):
+    """px: list of [r,g,b,a] floats (0-255) row-major -> PNG bytes."""
+    def c8(v):
+        i = int(v + 0.5)
+        if 0 <= i <= 255:
+            return i
+        return 0 if i < 0 else 255
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)
+        row = px[y * w:(y + 1) * w]
+        raw.extend(bytes([c8(p[j]) for p in row for j in (0, 1, 2, 3)]))
+
+    def chunk(t, d):
+        return (_ui_struct.pack('>I', len(d)) + t + d
+                + _ui_struct.pack('>I', _ui_zlib.crc32(t + d) & 0xffffffff))
+    return (b'\x89PNG\r\n\x1a\n'
+            + chunk(b'IHDR', _ui_struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+            + chunk(b'IDAT', _ui_zlib.compress(bytes(raw), 6))
+            + chunk(b'IEND', b''))
+
+
+# A.3  font.measure() memo.  The account rows, the proxy pills and the tab
+# strip measure the same few strings in the same few fonts on every redraw
+# (1 600 calls during one window resize).  Results are memoised per (font
+# description, text).  Font objects built from a description are keyed by
+# that description (most callers build a fresh Font for every draw); named
+# fonts are keyed by name and forgotten whenever one is reconfigured.
+_V20_MEASURE = {}
+try:
+    import tkinter.font as _v20_tkfont
+    _v20_orig_font_init = _v20_tkfont.Font.__init__
+    _v20_orig_measure = _v20_tkfont.Font.measure
+    _v20_orig_font_configure = _v20_tkfont.Font.configure
+
+    def _v20_font_init(self, root=None, font=None, name=None, exists=False, **options):
+        _v20_orig_font_init(self, root, font, name, exists, **options)
+        try:
+            if exists or name:
+                self._v20_key = ('name', str(self.name))
+            else:
+                self._v20_key = ('desc', repr(font), tuple(sorted((k, repr(v)) for k, v in options.items())))
+        except Exception:
+            self._v20_key = None
+
+    def _v20_measure(self, text, displayof=None):
+        key = getattr(self, '_v20_key', None)
+        if displayof is not None or key is None:
+            return _v20_orig_measure(self, text, displayof) if displayof is not None \
+                else _v20_orig_measure(self, text)
+        k = (key, text)
+        v = _V20_MEASURE.get(k)
+        if v is None:
+            v = _v20_orig_measure(self, text)
+            if len(_V20_MEASURE) > 20000:
+                _V20_MEASURE.clear()
+            _V20_MEASURE[k] = v
+        return v
+
+    def _v20_font_configure(self, **options):
+        if options:
+            _V20_MEASURE.clear()
+        return _v20_orig_font_configure(self, **options)
+
+    _v20_tkfont.Font.__init__ = _v20_font_init
+    _v20_tkfont.Font.measure = _v20_measure
+    _v20_tkfont.Font.configure = _v20_font_configure
+    _v20_tkfont.Font.config = _v20_font_configure
+except Exception:
+    _v20_dbg()
+
+
+# A.4  Log: batched, bounded.  log() may be called hundreds of times a
+# minute from worker threads during a run.  Each call used to schedule its
+# own UI callback that toggled the widget state, inserted, scrolled, and
+# possibly opened a toast (each toast forced a full update_idletasks()).
+# Now messages queue up and ONE flush on the Tk thread inserts them all,
+# scrolls once, keeps the widget to the last _V20_LOG_MAX lines, and shows
+# at most one toast (the most important message of the batch).  Every line
+# still reaches the log, with the same timestamp and colour tag.
+_V20_LOG_MAX = 4000
+_V20_LOG_TRIM = 600
+
+
+def _v20_log(self, message):
+    message = str(message)
+    stamp = time.strftime('%H:%M:%S')
+    q = getattr(self, '_v20_logq', None)
+    if q is None:
+        q = self._v20_logq = _v20_collections.deque()
+        self._v20_log_lock = _v20_threading.Lock()
+        self._v20_log_job = False
+    with self._v20_log_lock:
+        q.append((stamp, message))
+        if self._v20_log_job:
+            return
+        self._v20_log_job = True
+    try:
+        self.root.after(0, lambda: _v20_log_flush(self))
+    except Exception:
+        with self._v20_log_lock:
+            self._v20_log_job = False
+        print('[autoV2] ' + message)
+
+
+def _v20_log_flush(self):
+    q = getattr(self, '_v20_logq', None)
+    if q is None:
+        return
+    with self._v20_log_lock:
+        items = list(q)
+        q.clear()
+        self._v20_log_job = False
+    if not items:
+        return
+    la = getattr(self, 'log_area', None)
+    if la is None:
+        for _s, m in items:
+            print('[autoV2] ' + m)
+        return
+    toast = None
+    rank = {'err': 3, 'warn': 2, 'ok': 1}
+    try:
+        la.config(state='normal')
+        for stamp, message in items:
+            try:
+                tag = self._tag_for(message)
+            except Exception:
+                tag = 'ok'
+            la.insert(tk.END, '[%s] %s\n' % (stamp, message), tag)
+            kind = None
+            if any(k in message for k in ('❌', '\U0001f4a5', '\U0001f6ab')):
+                kind = 'err'
+            elif any(k in message for k in ('⚠️', '\U0001f511')):
+                kind = 'warn'
+            elif any(k in message for k in ('✅', '\U0001f3c1', '\U0001f517')):
+                kind = 'ok'
+            if kind and (toast is None or rank[kind] >= rank[toast[1]]):
+                toast = (message, kind)
+        try:
+            n = int(la.index('end-1c').split('.')[0])
+            if n > _V20_LOG_MAX:
+                la.delete('1.0', '%d.0' % (n - _V20_LOG_MAX + _V20_LOG_TRIM))
+        except Exception:
+            pass
+        la.see(tk.END)
+        la.config(state='disabled')
+    except Exception:
+        for _s, m in items:
+            print('[autoV2] ' + m)
+        return
+    if toast is not None:
+        try:
+            self.show_toast(toast[0], toast[1])
+        except Exception:
+            pass
+
+
+FacebookMultiPosterApp.log = _v20_log
+
+
+# A.5  One reusable toast.  Same place, look, text and 3-second life as the
+# original card, but the widgets are built once and re-used; a new message
+# replaces the current one instead of stacking another card on top, and
+# there is no forced update_idletasks() (the root size is already known).
+_v20_orig_show_toast = FacebookMultiPosterApp.show_toast
+
+
+def _v20_show_toast(self, message, kind='info'):
+    if not getattr(self, '_standalone', True):
+        return _v20_orig_show_toast(self, message, kind)
+    if self._closing or not getattr(self, 'root', None):
+        return
+    F = 'Segoe UI'
+    cfg = {'ok': ('success', 'g_grn_3', 'g_grn_1', '✓'),
+           'err': ('danger', 'g_red_3', 'g_red_1', '✕'),
+           'warn': ('warning', 'g_amb_3', 'g_amb_1', '!'),
+           'info': ('accent', 'g_ind_3', 'g_ind_1', 'i')}.get(kind, ('accent', 'g_ind_3', 'g_ind_1', 'i'))
+    acc, bgk, glowk, icon = C[cfg[0]], C[cfg[1]], C[cfg[2]], cfg[3]
+    short = message[:58] + ('…' if len(message) > 58 else '')
+    t = getattr(self, '_v20_toast', None)
+    try:
+        if t is None or not t['outer'].winfo_exists():
+            outer = tk.Frame(self.root, bg=glowk)
+            inner = tk.Frame(outer, bg=acc)
+            inner.pack(padx=1, pady=1)
+            core = tk.Frame(inner, bg=bgk)
+            core.pack(padx=0, pady=1)
+            row = tk.Frame(core, bg=bgk, padx=14, pady=10)
+            row.pack(fill=tk.X)
+            badge = tk.Frame(row, bg=acc, padx=6, pady=3)
+            badge.pack(side=tk.LEFT)
+            ic = tk.Label(badge, text=icon, font=(F, 9, 'bold'), bg=acc, fg='white')
+            ic.pack()
+            gap = tk.Frame(row, bg=bgk, width=10)
+            gap.pack(side=tk.LEFT)
+            col = tk.Frame(row, bg=bgk)
+            col.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            txt = tk.Label(col, text=short, font=(F, 9), bg=bgk, fg=C['text'], wraplength=248, justify='left')
+            txt.pack(anchor='w')
+            bar_bg = tk.Frame(core, bg=glowk, height=2)
+            bar_bg.pack(fill=tk.X)
+            bar = tk.Frame(bar_bg, bg=acc, height=2)
+            bar.place(relwidth=1.0, relheight=1.0)
+            for wdg in (outer, inner, core, row, badge, ic, gap, col, txt, bar_bg, bar):
+                wdg._i18n_src = None
+            t = self._v20_toast = {'outer': outer, 'inner': inner, 'core': core, 'row': row,
+                                   'badge': badge, 'ic': ic, 'gap': gap, 'col': col, 'txt': txt,
+                                   'bar_bg': bar_bg, 'bar': bar, 'job': None, 'step': 0}
+        else:
+            _ui_raw_conf(t['outer'], bg=glowk)
+            _ui_raw_conf(t['inner'], bg=acc)
+            for kk in ('core', 'row', 'gap', 'col'):
+                _ui_raw_conf(t[kk], bg=bgk)
+            _ui_raw_conf(t['badge'], bg=acc)
+            _ui_raw_conf(t['ic'], bg=acc, text=icon)
+            _ui_raw_conf(t['txt'], bg=bgk, fg=C['text'], text=short)
+            _ui_raw_conf(t['bar_bg'], bg=glowk)
+            _ui_raw_conf(t['bar'], bg=acc)
+        _ui_raw_conf(t['txt'], text=short)
+        rw = max(320, self.root.winfo_width())
+        rh = max(120, self.root.winfo_height())
+        t['outer'].place(x=max(4, rw - 316), y=max(4, rh - 84))
+        t['outer'].lift()
+        t['bar'].place(relwidth=1.0, relheight=1.0)
+    except Exception:
+        return _v20_orig_show_toast(self, message, kind)
+    if t.get('job'):
+        try:
+            t['outer'].after_cancel(t['job'])
+        except Exception:
+            pass
+    STEPS, DURATION = 12, 3000
+    t['step'] = 0
+
+    def _shrink():
+        try:
+            t['step'] += 1
+            s = t['step']
+            if s <= STEPS and not self._closing:
+                t['bar'].place(relwidth=max(0.0, 1.0 - s / float(STEPS)), relheight=1.0)
+                t['job'] = t['outer'].after(DURATION // STEPS, _shrink)
+            else:
+                t['job'] = None
+                t['outer'].place_forget()
+        except Exception:
+            t['job'] = None
+    try:
+        t['job'] = t['outer'].after(200, _shrink)
+    except Exception:
+        t['job'] = None
+
+
+FacebookMultiPosterApp.show_toast = _v20_show_toast
+
+
+# A.6  Adaptive UI pump.  Worker threads hand callbacks to the Tk thread
+# through a queue polled by _ui_pump.  It polled every 30 ms forever (33
+# wake-ups a second while idle).  It now keeps 30 ms while work is flowing
+# and backs off to 90 ms after two idle seconds; the first queued item
+# after a quiet spell is still picked up within 90 ms.
+def _v20_ui_pump(self):
+    self._ui_pump_job = None
+    if self._closing:
+        return
+    n = 0
+    for _ in range(500):
+        try:
+            ms, func, args = self._ui_queue.get_nowait()
+        except queue.Empty:
+            break
+        n += 1
+        try:
+            if ms and ms > 0:
+                self.root.after(ms, func, *args)
+            else:
+                func(*args)
+        except tk.TclError:
+            pass
+        except Exception:
+            traceback.print_exc()
+    now = time.time()
+    if n:
+        self._v20_pump_busy = now
+    idle = now - getattr(self, '_v20_pump_busy', now)
+    delay = 30 if idle < 2.0 else 90
+    try:
+        self._ui_pump_job = self.root.after(delay, self._ui_pump)
+    except Exception:
+        self._ui_pump_job = None
+
+
+FacebookMultiPosterApp._ui_pump = _v20_ui_pump
+
+
+# A.7  Trailing-edge relayout.  A drag-resize fires dozens of <Configure>
+# events; the old debounce ran a full relayout (~60 ms) every 90 ms WHILE
+# dragging, which is what made resizing stutter.  Now each new request
+# pushes the relayout back (110 ms of quiet), but never further than
+# 400 ms after the first request, so the window still follows the drag.
+def _v20_request_relayout(self, _e=None, force=False):
+    if force:
+        self._ui_force_next = True
+    now = time.time()
+    job = getattr(self, '_ui_relayout_job', None)
+    first = getattr(self, '_v20_relayout_first', None)
+    if job:
+        if first is not None and now - first > 0.40:
+            return                                   # let the pending one run
+        try:
+            self.root.after_cancel(job)
+        except Exception:
+            pass
+    else:
+        self._v20_relayout_first = now
+
+    def _run():
+        self._ui_relayout_job = None
+        self._v20_relayout_first = None
+        f = getattr(self, '_ui_force_next', False)
+        self._ui_force_next = False
+        self._relayout_current_tab(force=f)
+    try:
+        self._ui_relayout_job = self.root.after(110, _run)
+    except Exception:
+        self._ui_relayout_job = None
+
+
+FacebookMultiPosterApp._ui_request_relayout = _v20_request_relayout
+
+
+# A.8  Save the render cache on the way out (and once, a little after
+# start-up, so a crash later still keeps the work done at start).
+_v20_orig_teardown = FacebookMultiPosterApp.teardown
+
+
+def _v20_teardown(self, *a, **kw):
+    try:
+        _v20_png_cache_save()
+    except Exception:
+        pass
+    return _v20_orig_teardown(self, *a, **kw)
+
+
+FacebookMultiPosterApp.teardown = _v20_teardown
+
+
+# ----------------------------------------------------------------------
+# PART B — design system v20 ("Indigo")
+# A calm, compact SaaS look: cool-grey canvas, white cards with hairline
+# borders, one indigo accent, emerald for "on/online", rose for danger;
+# a deep ink sidebar; the same tokens drive the light and the dark theme.
+# Every colour still goes through the palette keys the theme engine
+# already knows, so the light/dark switch, the colour guards and the
+# hover handlers keep working unchanged.
+# ----------------------------------------------------------------------
+_V20_LIGHT = {
+    'bg': '#f3f4f8', 'surface': '#ffffff', 'surface2': '#f7f8fb', 'surface3': '#eceef4',
+    'glass_shine': '#fbfbfd', 'glass_tile': '#f5f6fa', 'glass_edge': '#e3e6ee',
+    'accent': '#4f46e5', 'accent2': '#4338ca', 'accent_lt': '#3730a3',
+    'purple': '#7c3aed', 'purple2': '#6d28d9', 'purple_lt': '#f2edff',
+    'success': '#059669', 'success2': '#047857', 'success_d': '#d1fae5',
+    'danger': '#e11d48', 'danger2': '#be123c', 'danger_d': '#ffe4e6',
+    'warning': '#d97706', 'warning2': '#b45309', 'warning_d': '#fef3c7',
+    'info': '#0284c7',
+    'text': '#111827', 'text2': '#4b5563', 'text3': '#9ca3af',
+    'border': '#e5e7eb', 'border2': '#d1d5db',
+    'g_ind_1': '#e0e7ff', 'g_ind_3': '#eef2ff',
+    'g_grn_1': '#10b981', 'g_grn_2': '#34d399', 'g_grn_3': '#ecfdf5',
+    'g_red_1': '#f43f5e', 'g_red_2': '#fb7185', 'g_red_3': '#fff1f2',
+    'g_amb_1': '#f59e0b', 'g_amb_2': '#fbbf24', 'g_amb_3': '#fffbeb',
+}
+_V20_DARK = {
+    'bg': '#0b0d12', 'surface': '#13161d', 'surface2': '#181c24', 'surface3': '#20252f',
+    'glass_shine': '#151920', 'glass_tile': '#0f1218', 'glass_edge': '#272c38',
+    'accent': '#6366f1', 'accent2': '#4f46e5', 'accent_lt': '#a5b4fc',
+    'purple': '#8b5cf6', 'purple2': '#7c3aed', 'purple_lt': '#231b3b',
+    'success': '#10b981', 'success2': '#059669', 'success_d': '#062a20',
+    'danger': '#f43f5e', 'danger2': '#e11d48', 'danger_d': '#34101b',
+    'warning': '#f59e0b', 'warning2': '#d97706', 'warning_d': '#33230a',
+    'info': '#38bdf8',
+    'text': '#e6e8ee', 'text2': '#9ba3b4', 'text3': '#687084',
+    'border': '#242935', 'border2': '#303644',
+    'g_ind_1': '#312e81', 'g_ind_3': '#1b1a3f',
+    'g_grn_1': '#34d399', 'g_grn_2': '#065f46', 'g_grn_3': '#052b21',
+    'g_red_1': '#fb7185', 'g_red_2': '#9f1239', 'g_red_3': '#2b0c16',
+    'g_amb_1': '#fbbf24', 'g_amb_2': '#92400e', 'g_amb_3': '#291c07',
+}
+_V20_LIGHT = _ui13_unique(_V20_LIGHT)
+_V20_DARK = _ui13_unique(_V20_DARK)
+for _v20_d, _v20_s in ((_UI_LIGHT, _V20_LIGHT), (_UI_DARK, _V20_DARK), (_UI13_LIGHT, _V20_LIGHT),
+                       (_UI13_DARK, _V20_DARK), (C_LIGHT, _V20_LIGHT), (C_DARK, _V20_DARK)):
+    _v20_d.update(_v20_s)
+C.update(C_DARK if _CURRENT_THEME[0] == 'dark' else C_LIGHT)
+try:
+    FacebookMultiPosterApp._LIGHT_TO_KEY = None
+    FacebookMultiPosterApp._DARK_TO_KEY = None
+except Exception:
+    pass
+_UI_SWITCH_ON = '#10b981'
+_UI_SWITCH_OFF = '#d1d5dc'
+
+# deep ink sidebar (outside both palettes on purpose, see _SB above)
+_SB.update({
+    'bg': '#0d0f1c', 'line': '#1b1e33', 'hover': '#161a2e', 'active': '#222652',
+    'bar': '#818cf8', 'text': '#a4a9c4', 'muted': '#626884', 'white': '#fdfdff',
+    'green': '#34d399', 'rose': '#fb7185', 'amber': '#fbbf24',
+    'dim': '#151831', 'dim_text': '#585e80',
+    'card': '#11142a', 'card_line': '#232748', 'pill_bg': '#262a57', 'pill_fg': '#c7d0fe',
+    'trough': '#1b1e3a',
+})
+
+
+def _v20_keep_out(d, forbidden):
+    """Nudge any sidebar colour that collides with a palette value (the
+    colour guards map by value, so they must stay distinct)."""
+    for k, v in list(d.items()):
+        c = v.lower()
+        while c in forbidden:
+            r, g, b = _ui_hex(c)
+            c = '#%02x%02x%02x' % (r, g, b + 1 if b < 255 else b - 1)
+        d[k] = c
+
+
+_v20_keep_out(_SB, set(_V20_LIGHT.values()) | set(_V20_DARK.values()))
+
+_LOGC.update({'card': '#0f1222', 'line': '#1e2240', 'box': '#0b0d1a', 'btn': '#1a1e38',
+              'text': '#cdd3e1', 'title': '#f3f4f8', 'muted': '#8a90ae',
+              'live_bg': '#0d3b30', 'live_fg': '#6ee7b7'})
+try:
+    _UI13_LOG_TAGS.update({'ok': '#34d399', 'err': '#fb7185', 'warn': '#fbbf24', 'info': '#93c5fd'})
+except Exception:
+    pass
+_UI13_LINK_COLS = (('#4f46e5', '#7c3aed', '#6366f1', '#8b5cf6'),
+                   ('#059669', '#0d9488', '#10b981', '#14b8a6'))
+_UI13_PX_LIGHT.update({'ok': ('#d1fae5', '#065f46'), 'bad': ('#ffe4e6', '#9f1239'),
+                       'checking': ('#fef3c7', '#92400e')})
+_UI13_PX_DARK.update({'ok': ('#0b3b2e', '#6ee7b7'), 'bad': ('#3f1520', '#fda4af'),
+                      'checking': ('#3a2a0c', '#fcd34d')})
+
+# compact rhythm: 8 px outer margin and gutters, 30 px account rows
+_UI13_M, _UI13_G = 8, 8
+FacebookMultiPosterApp.ROW_H = 30
+
+# sidebar action buttons in the indigo palette
+_v20_prev_btn_style = _ui13_btn_style
+
+
+def _ui13_btn_style(role, key):
+    if role == 'start' and key != 'surface2':
+        return ('#6366f1' if key == 'accent2' else '#4f46e5', _SB['white'])
+    return _v20_prev_btn_style(role, key)
+
+
+# ------------------------------------------------ compact window size
+# The window opens at a compact 1320 × 840 (clamped to the screen) instead
+# of 90 % of the screen, and the one-off 1440 × 960 resize of v13 is gone.
+_V20_WIN = (1320, 840)
+
+
+def _ui13_default_size(self):
+    """Once, on the first start of v20: open at the compact size (the saved
+    window size of earlier versions is replaced a single time; afterwards
+    the size the user chooses is remembered as before)."""
+    if not getattr(self, '_standalone', False):
+        return
+    try:
+        flag = os.path.join(SESSION_BASE, 'ui20_layout.flag')
+        if os.path.exists(flag):
+            return
+        top = self.root.winfo_toplevel()
+        if str(top.state()) == 'normal':
+            geo = _v20_compact_geometry(top)
+            if geo:
+                top.geometry(geo)
+        os.makedirs(SESSION_BASE, exist_ok=True)
+        with open(flag, 'w') as fh:
+            fh.write('1')
+    except Exception:
+        pass
+
+
+def _v20_compact_geometry(root):
+    try:
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    except Exception:
+        return None
+    W = max(900, min(_V20_WIN[0], sw - 40))
+    H = max(620, min(_V20_WIN[1], sh - 70))
+    return '%dx%d+%d+%d' % (W, H, max(0, (sw - W) // 2), max(0, (sh - H) // 3))
+
+
+_v20_orig_app_init = FacebookMultiPosterApp.__init__
+
+
+def _v20_app_init(self, root, ctx=None, standalone=True):
+    patched = False
+    if standalone:
+        geo = _v20_compact_geometry(root)
+        if geo:
+            real = root.geometry
+            state = {'done': False}
+
+            def _geometry(newGeometry=None, _real=real):
+                # the first call from __init__ sets the start size: use ours
+                if newGeometry and not state['done']:
+                    state['done'] = True
+                    return _real(geo)
+                return _real(newGeometry)
+            try:
+                root.geometry = _geometry
+                patched = True
+            except Exception:
+                patched = False
+    try:
+        _v20_orig_app_init(self, root, ctx, standalone)
+    finally:
+        if patched:
+            try:
+                del root.geometry
+            except Exception:
+                pass
+        if standalone:
+            try:
+                g = root.geometry()
+                self._full_geometry = g.split('+')[0]
+            except Exception:
+                pass
+
+
+FacebookMultiPosterApp.__init__ = _v20_app_init
+
+
+# ------------------------------------------------------------ helpers
+def _v20_font(size=9, weight=None):
+    z = _UI_ZOOM[0] if _UI_ZOOM else 1.0
+    s = max(7, int(round(size * z)))
+    return (_F13, s, weight) if weight else (_F13, s)
+
+
+def _v20_hover(w, normal, hover, active_fn=None):
+    """Background hover on a flat Label/Frame; normal/hover are palette keys
+    or colours (re-read on every event so a theme switch is honoured)."""
+    def col(v):
+        return C.get(v, v) if isinstance(v, str) else v
+
+    def enter(_e=None):
+        if active_fn is not None and active_fn():
+            return
+        try:
+            _ui_raw_conf(w, bg=col(hover))
+        except Exception:
+            pass
+
+    def leave(_e=None):
+        if active_fn is not None and active_fn():
+            return
+        try:
+            _ui_raw_conf(w, bg=col(normal))
+        except Exception:
+            pass
+    w.bind('<Enter>', enter, add='+')
+    w.bind('<Leave>', leave, add='+')
+
+
+# ------------------------------------------------------------ sidebar
+_V20_METHOD_SRC = {'m1': 'MÉTHODE 1 · PUBLICATION', 'm2': 'MÉTHODE 2 · PROFILS'}
+_TRAW.setdefault('MÉTHODE 1 · PUBLICATION', ('METHOD 1 · POSTING', 'MÉTODO 1 · PUBLICACIÓN',
+                                                        'الطريقة 1 · النشر'))
+_TRAW.setdefault('MÉTHODE 2 · PROFILS', ('METHOD 2 · PROFILES', 'MÉTODO 2 · PERFILES',
+                                                    'الطريقة 2 · الملفات الشخصية'))
+
+
+def _v20_method_caption(self, parent, key, before=None):
+    import tkinter as _tk
+    f = _tk.Frame(parent, bg=_SB['bg'])
+    kw = dict(fill='x', padx=14, pady=(10, 2))
+    if before is not None:
+        kw['before'] = before
+    f.pack(**kw)
+    dot = _tk.Label(f, text='1' if key == 'm1' else '2', font=(_F13, 7, 'bold'), bg=_SB['pill_bg'],
+                    fg=_SB['pill_fg'], padx=4, pady=0)
+    dot._i18n_src = None
+    dot.pack(side='left')
+    lab = _tk.Label(f, text=_V20_METHOD_SRC[key], font=(_F13, 7, 'bold'), bg=_SB['bg'], fg=_SB['muted'])
+    lab.pack(side='left', padx=(6, 0))
+    for w in (f, dot, lab):
+        try:
+            _ui13_guard(w, _ui13_sb_fix)
+        except Exception:
+            pass
+    return f
+
+
+def _v20_style_sidebar(self):
+    btns = getattr(self, '_tab_btns', None) or {}
+    if not btns or getattr(self, '_v20_sb_done', False):
+        return
+    try:
+        nav_top = btns['config'][0].master.master
+    except Exception:
+        return
+    # the NAVIGATION caption stays; "Method 1" goes right above it
+    cap = None
+    for ch in nav_top.pack_slaves():
+        if ch.winfo_class() == 'Label':
+            cap = ch
+            break
+    try:
+        _v20_method_caption(self, nav_top, 'm1', before=cap if cap is not None else btns['config'][0].master)
+        if cap is not None:
+            cap.pack_configure(padx=20, pady=(2, 4))
+            cap.configure(font=(_F13, 7, 'bold'))
+    except Exception:
+        _v20_dbg()
+    # "Method 2" above Profiles
+    prof = btns.get('profiles')
+    if prof is not None:
+        try:
+            _v20_method_caption(self, nav_top, 'm2', before=prof[0].master)
+        except Exception:
+            _v20_dbg()
+    # tighter, calmer nav rows
+    for key, (lbl, bar) in btns.items():
+        try:
+            lbl.master.pack_configure(padx=(10, 10), pady=0)
+            _ui_raw_conf(lbl, padx=12, pady=6)
+        except Exception:
+            pass
+    self._v20_sb_done = True
+
+
+# referral call-to-action in the sidebar ("Earn an extra 15$ or Pro licence")
+_TRAW.setdefault('Gagnez %s de plus ou une licence Pro', ('Earn An Extra %s or Pro License',
+                                                          'Gana %s extra o una licencia Pro',
+                                                          'اربح %s إضافية أو ترخيص Pro'))
+
+
+def _v20_referral_text(self):
+    amount = '15$'
+    try:
+        st = getattr(self, '_v20_ref_state', None) or {}
+        cash = str(st.get('cash_amount') or st.get('reward_cash') or '').strip()
+        if cash:
+            amount = cash if ('$' in cash or '€' in cash) else cash + '$'
+    except Exception:
+        pass
+    src = 'Gagnez %s de plus ou une licence Pro'
+    return (_TR(src) % amount) if '%s' in _TR(src) else _TR(src)
+
+
+def _v20_build_referral_cta(self):
+    import tkinter as _tk
+    links = getattr(self, '_ui_links', None) or []
+    if not links or getattr(self, '_v20_ref_cv', None) is not None:
+        return
+    holder = links[0].master
+    W, H = 190, 40
+    cv = _tk.Canvas(holder, width=W, height=H + 2, bg=_SB['bg'], highlightthickness=0, cursor='hand2')
+    cv.pack(before=links[0], pady=(0, 7))
+    try:
+        _ui13_guard(cv, _ui13_sb_fix)
+    except Exception:
+        pass
+
+    def draw(state='idle'):
+        try:
+            cv.delete('all')
+            top, bot = ('#c026d3', '#7c3aed') if state == 'hover' else ('#a21caf', '#6d28d9')
+            img = _ui_photo(cv, ('ref20', W, H, top, bot), lambda: _ui_render_button(W, H, 10, top, bot))
+            cv.create_image(0, 0, anchor='nw', image=img)
+            cv.create_text(W // 2, H // 2, text='★  ' + _v20_referral_text(self),
+                           font=(_F13, 8, 'bold'), fill='white', width=W - 16, justify='center')
+        except Exception:
+            _v20_dbg()
+    cv.bind('<Enter>', lambda e: draw('hover'))
+    cv.bind('<Leave>', lambda e: draw('idle'))
+    cv.bind('<Button-1>', lambda e: _v20_open_nav(self, 'invite'))
+    cv._ui_draw = draw
+    self._v20_ref_cv = cv
+    draw()
+
+
+# ------------------------------------------------------------ top bar
+# Row 1 (title bar): licence controls on the left - About · plan · Upgrade ·
+# Register licence - and the existing status / zoom / language / theme /
+# window controls on the right.  Row 2: the page tabs of the current method.
+_V20_TABS_M1 = None           # filled from _UI13_TABS at build time
+_V20_TABS_M2 = (('profiles', 'Profils', '◉'), ('invite', 'Inviter', '✉'))
+_TRAW.setdefault('Profils', ('Profiles', 'Perfiles', 'الملفات الشخصية'))
+_TRAW.setdefault('Inviter', ('Invite', 'Invitar', 'دعوة'))
+_TRAW.setdefault('◉   Profils', ('◉   Profiles', '◉   Perfiles', '◉   الملفات الشخصية'))
+_TRAW.setdefault('✉   Inviter', ('✉   Invite', '✉   Invitar', '✉   دعوة'))
+_TRAW.setdefault('À propos', ('About', 'Acerca de', 'حول'))
+_TRAW.setdefault('Plan gratuit', ('Free plan', 'Plan gratuito', 'الخطة المجانية'))
+_TRAW.setdefault('Plan Pro', ('Pro plan', 'Plan Pro', 'خطة Pro'))
+_TRAW.setdefault('Plan Illimité équipe', ('Unlimited for Team plan', 'Plan Ilimitado para equipos',
+                                                 'خطة غير محدودة للفريق'))
+_TRAW.setdefault('★  Mettre à niveau', ('★  Upgrade', '★  Mejorar', '★  ترقية'))
+_TRAW.setdefault('Enregistrer la licence', ('Register licence', 'Registrar licencia', 'تسجيل الترخيص'))
+_TRAW.setdefault('Mon plan', ('My plan', 'Mi plan', 'خطتي'))
+
+
+def _v20_method_of(tab):
+    return 'm2' if tab in ('profiles', 'invite') else 'm1'
+
+
+def _v20_tabs_draw(self):
+    """The tab strip shows the pages of the current method."""
+    global _UI13_TABS
+    saved = _UI13_TABS
+    try:
+        if _v20_method_of(getattr(self, '_current_tab', 'config')) == 'm2':
+            _UI13_TABS = _V20_TABS_M2
+        elif _V20_TABS_M1:
+            _UI13_TABS = _V20_TABS_M1
+        _v20_prev_tabs_draw(self)
+    finally:
+        _UI13_TABS = saved
+    try:
+        cap = getattr(self, '_v20_tab_caption', None)
+        if cap is not None:
+            _ui_raw_conf(cap, text=_TR(_V20_METHOD_SRC[_v20_method_of(getattr(self, '_current_tab', 'config'))]),
+                         bg=C['surface'], fg=C['text3'])
+    except Exception:
+        pass
+
+
+_v20_prev_tabs_draw = _ui13_tabs_draw
+_ui13_tabs_draw = _v20_tabs_draw
+
+
+def _v20_tab_at(self, x):
+    for key, x0, w, _l in getattr(self, '_ui13_tab_segs', ()) or ():
+        if x0 <= x < x0 + w:
+            return key
+    return None
+
+
+def _v20_topbar(self):
+    import tkinter as _tk
+    global _V20_TABS_M1
+    tb = getattr(self, '_ui13_titlebar', None)
+    right = getattr(self, '_ui13_right', None)
+    old_cv = getattr(self, '_ui13_tabs_cv', None)
+    if tb is None or right is None or getattr(self, '_v20_tabbar', None) is not None:
+        return
+    if _V20_TABS_M1 is None:
+        _V20_TABS_M1 = tuple(t for t in _UI13_TABS if t[0] not in ('profiles', 'invite'))
+    _ui_raw_conf(tb, height=42, bg=C['surface'])
+    # row 2: a new tab bar right under the title bar
+    bar = _tk.Frame(right, bg=C['surface'], height=40)
+    bar.pack(side='top', fill='x', after=tb)
+    bar.pack_propagate(False)
+    line = _tk.Frame(right, bg=C['border'], height=1)
+    line.pack(side='top', fill='x', after=bar)
+    cv = _tk.Canvas(bar, height=32, width=300, bg=C['surface'], highlightthickness=0, cursor='hand2')
+    cv.pack(side='left', padx=(12, 0), pady=4)
+    cap = _tk.Label(bar, text=_TR(_V20_METHOD_SRC['m1']), font=(_F13, 7, 'bold'), bg=C['surface'], fg=C['text3'])
+    cap._i18n_src = None
+    cap.pack(side='right', padx=(0, 16))
+    self._v20_tab_caption = cap
+    if old_cv is not None:
+        try:
+            old_cv.destroy()
+        except Exception:
+            pass
+    self._ui13_tabs_cv = cv
+    self._ui13_tab_hover = None
+
+    def click(e):
+        k = _v20_tab_at(self, e.x)
+        if k:
+            _v20_open_nav(self, k)
+
+    def hover(x):
+        k = None if x is None else _v20_tab_at(self, x)
+        if k != getattr(self, '_ui13_tab_hover', None):
+            self._ui13_tab_hover = k
+            _ui13_tabs_draw(self)
+    cv.bind('<Button-1>', click)
+    cv.bind('<Motion>', lambda e: hover(e.x))
+    cv.bind('<Leave>', lambda e: hover(None))
+    self._v20_tabbar = bar
+    self._v20_tabbar_line = line
+    # row 1, left: the licence controls
+    lic = _tk.Frame(tb, bg=C['surface'])
+    lic.pack(side='left', padx=(12, 0), pady=7)
+    self._v20_lic_box = lic
+    _v20_refresh_license_cluster(self)
+    _ui13_tabs_draw(self)
+
+
+def _v20_pill(parent, text, kind='ghost', command=None, src=None):
+    """A flat, rounded-looking top-bar button (Label based: crisp, cheap)."""
+    import tkinter as _tk
+    styles = {
+        'ghost': ('surface', 'text2', 'surface3', 'border'),
+        'accent': ('accent', '#ffffff', 'accent2', 'accent'),
+        'plan_free': ('surface3', 'text2', 'border', 'border'),
+        'plan_pro': ('g_ind_3', 'accent', 'g_ind_1', 'g_ind_1'),
+        'plan_team': ('g_grn_3', 'success', 'success_d', 'success_d'),
+    }
+    bgk, fgk, hvk, bdk = styles.get(kind, styles['ghost'])
+
+    def col(v):
+        return C.get(v, v)
+    lbl = _tk.Label(parent, text=text, font=(_F13, 9, 'bold' if kind in ('accent',) or kind.startswith('plan') else 'normal'),
+                    bg=col(bgk), fg=col(fgk), padx=10, pady=3, cursor='hand2' if command else '',
+                    highlightthickness=1, highlightbackground=col(bdk), highlightcolor=col(bdk))
+    if src is not None:
+        lbl._i18n_src = src
+    lbl._v20_style = (bgk, fgk, hvk, bdk)
+    if command is not None:
+        lbl.bind('<Button-1>', lambda e: command())
+        _v20_hover(lbl, bgk, hvk)
+    return lbl
+
+
+def _v20_plan(self):
+    cl = _v20_client(self)
+    if cl is None:
+        return 'free'
+    try:
+        return cl.current_plan()
+    except Exception:
+        return 'free'
+
+
+def _v20_refresh_license_cluster(self):
+    box = getattr(self, '_v20_lic_box', None)
+    if box is None:
+        return
+    for ch in box.winfo_children():
+        try:
+            ch.destroy()
+        except Exception:
+            pass
+    plan = _v20_plan(self)
+    _v20_pill(box, _TR('À propos'), 'ghost', lambda: _v20_about(self),
+              src='À propos').pack(side='left', padx=(0, 6))
+    name = {'free': 'Plan gratuit', 'pro': 'Plan Pro', 'team': 'Plan Illimité équipe'}.get(plan, 'Plan gratuit')
+    _v20_pill(box, _TR(name), 'plan_' + plan, lambda: _v20_plan_dialog(self), src=name).pack(side='left', padx=(0, 6))
+    gc = getattr(self, '_v20_gc', None)
+    if plan == 'free':
+        _v20_pill(box, _TR('★  Mettre à niveau'), 'accent', lambda: _v20_upgrade(self),
+                  src='★  Mettre à niveau').pack(side='left', padx=(0, 6))
+        locked = False
+        try:
+            locked = bool(gc is not None and (gc._activation_lock_state() or {}).get('locked'))
+        except Exception:
+            locked = False
+        if not locked:
+            _v20_pill(box, _TR('Enregistrer la licence'), 'ghost', lambda: _v20_register(self),
+                      src='Enregistrer la licence').pack(side='left', padx=(0, 6))
+    else:
+        _v20_pill(box, _TR('Mon plan'), 'ghost', lambda: _v20_plan_dialog(self),
+                  src='Mon plan').pack(side='left', padx=(0, 6))
+
+
+def _v20_recolor_chrome(self):
+    """Theme switch: colours of the widgets v20 created."""
+    for w in (getattr(self, '_v20_tabbar', None), getattr(self, '_ui13_tabs_cv', None),
+              getattr(self, '_v20_lic_box', None)):
+        if w is not None:
+            try:
+                _ui_raw_conf(w, bg=C['surface'])
+            except Exception:
+                pass
+    ln = getattr(self, '_v20_tabbar_line', None)
+    if ln is not None:
+        _ui_raw_conf(ln, bg=C['border'])
+    tb = getattr(self, '_ui13_titlebar', None)
+    if tb is not None:
+        _ui_raw_conf(tb, bg=C['surface'])
+    try:
+        _v20_refresh_license_cluster(self)
+    except Exception:
+        _v20_dbg()
+    try:
+        _ui13_tabs_draw(self)
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------
+# PART D — licensing & remote control from the website
+# One LicenseClient for the whole application (the Profiles tool uses the
+# same instance).  It learns everything from the signed check-in: plan,
+# master switch, update policy, per-option gates and ZIP link rules.
+# ----------------------------------------------------------------------
+try:
+    import license_client as _v20_lic
+except Exception:
+    _v20_lic = None
+
+
+def _v20_client(self):
+    return getattr(self, '_v20_client_obj', None)
+
+
+def _v20_api_base():
+    try:
+        base = str(getattr(_v20_lic, 'API_BASE', '') or '').rstrip('/')
+        if base:
+            return base
+    except Exception:
+        pass
+    return 'https://mavlink.click'
+
+
+def _v20_start_license(self):
+    """Create the shared licence client off the Tk thread (it reads the
+    machine id and the DPAPI-protected state), then start its check-ins."""
+    if _v20_lic is None or not getattr(self, '_standalone', False):
+        return
+    if getattr(self, '_v20_lic_started', False):
+        return
+    self._v20_lic_started = True
+    try:
+        _v20_lic.APP_VERSION = _V20_CHECKIN_VERSION
+    except Exception:
+        pass
+
+    def work():
+        cl = None
+        try:
+            cl = _v20_lic.LicenseClient()
+        except Exception:
+            _v20_dbg()
+            cl = None
+        self._post_ui(0, lambda: _v20_license_ready(self, cl))
+    _v20_threading.Thread(target=work, daemon=True, name='licence-init').start()
+
+
+def _v20_license_ready(self, cl):
+    if self._closing:
+        return
+    self._v20_client_obj = cl
+    self._v20_lic_ready = True
+    if cl is not None:
+        try:
+            cl.start_background()
+        except Exception:
+            _v20_dbg()
+    _v20_apply_gates(self)
+    _v20_refresh_license_cluster(self)
+    _v20_control_tick(self)
+
+
+def _v20_control_signature(cl):
+    try:
+        return (cl.current_plan(), bool(cl.app_allowed()), bool(cl.needs_update()),
+                repr(sorted((getattr(cl, 'gates', {}) or {}).items())),
+                repr(getattr(cl, 'ziplinks', {})), str(getattr(cl, 'tool_control_version', '')))
+    except Exception:
+        return None
+
+
+def _v20_control_tick(self):
+    """Every few seconds: follow the dashboard.  A plan change, a new gate
+    matrix or new ZIP rules are applied live - no restart needed.  When the
+    administrator switches the application OFF every running task is
+    stopped; the blocking dialog itself is the Profiles tool's (or ours when
+    that tool is not available)."""
+    if self._closing:
+        return
+    cl = _v20_client(self)
+    if cl is not None:
+        sig = _v20_control_signature(cl)
+        if sig != getattr(self, '_v20_ctl_sig', None):
+            self._v20_ctl_sig = sig
+            _v20_apply_gates(self)
+            _v20_refresh_license_cluster(self)
+        try:
+            blocked = cl.is_blocked_by_admin()
+        except Exception:
+            blocked = False
+        if blocked:
+            _v20_stop_all_tasks(self, _TR("Application désactivée par l'administrateur."))
+            if getattr(self, '_v20_gc', None) is None and not getattr(self, '_v20_block_shown', False):
+                self._v20_block_shown = True
+                _v20_blocked_dialog(self, cl)
+    try:
+        self._v20_ctl_job = self.root.after(4000, lambda: _v20_control_tick(self))
+    except Exception:
+        self._v20_ctl_job = None
+
+
+_TRAW.setdefault("Application désactivée par l'administrateur.",
+                 ('Application disabled by the administrator.', 'Aplicación desactivada por el administrador.',
+                  'أوقف المسؤول التطبيق.'))
+
+
+def _v20_stop_all_tasks(self, why=''):
+    """Stop posting, automatic mode, shorts, Free ID and the cleaner."""
+    was = False
+    for attr in ('is_running', '_jg_running', '_lk_running', '_cm_running', '_sc_running', '_sc_test_running'):
+        try:
+            if getattr(self, attr, False):
+                was = True
+                setattr(self, attr, False)
+        except Exception:
+            pass
+    try:
+        self._paused = False
+    except Exception:
+        pass
+    for fn in (globals().get('_sv_stop'), globals().get('_fid_stop'), globals().get('_ui14_dd_stop')):
+        try:
+            if fn is not None:
+                fn(self)
+        except Exception:
+            pass
+    if was and why:
+        try:
+            self.log('⛔ ' + why)
+        except Exception:
+            pass
+
+
+def _v20_blocked_dialog(self, cl):
+    """Fallback for builds without the Profiles tool: a modal that closes
+    itself when the dashboard switches the application back on."""
+    import tkinter as _tk
+    win = _v20_dialog(self, _TR("Application désactivée par l'administrateur."), '⛔')
+    body = win._v20_body
+    msg = ''
+    try:
+        msg = cl.blocked_reason()
+    except Exception:
+        pass
+    _tk.Label(body, text=msg, font=_v20_font(10), bg=C['surface'], fg=C['text'], wraplength=380,
+              justify='left').pack(anchor='w')
+
+    def watch():
+        try:
+            if not win.winfo_exists():
+                return
+            if cl.app_allowed():
+                self._v20_block_shown = False
+                win.destroy()
+                return
+        except Exception:
+            pass
+        win.after(3000, watch)
+    _v20_dialog_buttons(win, [(_TR('Fermer'), lambda: _v20_quit(self), 'ghost')])
+    try:
+        win.grab_set()
+    except Exception:
+        pass
+    watch()
+
+
+def _v20_quit(self):
+    top = None
+    try:
+        top = self.root.winfo_toplevel()
+    except Exception:
+        pass
+    try:
+        self.teardown()
+    finally:
+        try:
+            if top is not None:
+                top.destroy()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------- dialogs
+_TRAW.setdefault('Fermer', ('Close', 'Cerrar', 'إغلاق'))
+
+
+def _v20_dialog(self, title, icon=''):
+    """A themed modal card in the application's own style."""
+    import tkinter as _tk
+    top = self.root.winfo_toplevel()
+    win = _tk.Toplevel(top)
+    win.withdraw()
+    win.title(title)
+    win.configure(bg=C['border'])
+    win.resizable(False, False)
+    try:
+        win.transient(top)
+    except Exception:
+        pass
+    card = _tk.Frame(win, bg=C['surface'], padx=22, pady=18)
+    card.pack(fill='both', expand=True, padx=1, pady=1)
+    head = _tk.Frame(card, bg=C['surface'])
+    head.pack(fill='x', pady=(0, 10))
+    if icon:
+        _tk.Label(head, text=icon, font=_v20_font(14), bg=C['surface'], fg=C['accent']).pack(side='left', padx=(0, 8))
+    _tk.Label(head, text=title, font=_v20_font(12, 'bold'), bg=C['surface'], fg=C['text']).pack(side='left')
+    body = _tk.Frame(card, bg=C['surface'])
+    body.pack(fill='both', expand=True)
+    win._v20_card = card
+    win._v20_body = body
+
+    def place():
+        try:
+            win.update_idletasks()
+            w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+            x = top.winfo_rootx() + max(0, (top.winfo_width() - w) // 2)
+            y = top.winfo_rooty() + max(0, (top.winfo_height() - h) // 3)
+            win.geometry('+%d+%d' % (x, y))
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+        except Exception:
+            try:
+                win.deiconify()
+            except Exception:
+                pass
+    win.after(10, place)
+    win.bind('<Escape>', lambda e: win.destroy())
+    return win
+
+
+def _v20_dialog_buttons(win, specs):
+    import tkinter as _tk
+    row = _tk.Frame(win._v20_card, bg=C['surface'])
+    row.pack(fill='x', pady=(16, 0))
+    for text, fn, kind in reversed(specs):
+        b = _v20_pill(row, text, kind, fn)
+        b.configure(pady=5, padx=14)
+        b.pack(side='right', padx=(8, 0))
+    return row
+
+
+def _v20_about(self):
+    import tkinter as _tk
+    win = _v20_dialog(self, 'AutoPoster Pro ' + str(APP_VERSION), '▶')
+    b = win._v20_body
+    cl = _v20_client(self)
+    status = ''
+    try:
+        status = cl.status_line() if cl is not None else ''
+    except Exception:
+        status = ''
+    lines = [
+        (_TR('MÉTHODE 1 · PUBLICATION'), 'bold'),
+        ('Configuration · Automatic mode · Edit Shorts Video Tool · Free ID · Log', None),
+        ('', None),
+        (_TR('MÉTHODE 2 · PROFILS'), 'bold'),
+        ('Chrome Profile Generator: isolated profiles, each with its own fingerprint, icon and cookies. '
+         'User scripts are delivered from the dashboard and injected at runtime.', None),
+        ('', None),
+        ('Build %s · %s' % (_V20_CHECKIN_VERSION, status or _TR('Plan gratuit')), 'muted'),
+    ]
+    for text, style in lines:
+        if not text:
+            _tk.Frame(b, bg=C['surface'], height=6).pack()
+            continue
+        _tk.Label(b, text=text, font=_v20_font(9, 'bold') if style == 'bold' else _v20_font(9),
+                  bg=C['surface'], fg=C['text3'] if style == 'muted' else C['text'],
+                  wraplength=420, justify='left').pack(anchor='w')
+    _v20_dialog_buttons(win, [(_TR('Fermer'), win.destroy, 'ghost')])
+
+
+def _v20_upgrade(self):
+    gc = _v20_ensure_gc(self)
+    if gc is not None:
+        try:
+            gc._open_upgrade()
+            return
+        except Exception:
+            _v20_dbg()
+    _ui_open_url(_v20_api_base() + '/pricing.php?ref=app')
+
+
+def _v20_register(self):
+    gc = _v20_ensure_gc(self)
+    if gc is not None:
+        try:
+            gc._register_serial_dialog()
+            return
+        except Exception:
+            _v20_dbg()
+    _v20_register_fallback(self)
+
+
+def _v20_register_fallback(self):
+    import tkinter as _tk
+    cl = _v20_client(self)
+    if cl is None:
+        return
+    win = _v20_dialog(self, _TR('Enregistrer la licence'), '★')
+    var = _tk.StringVar()
+    e = _tk.Entry(win._v20_body, textvariable=var, width=36, font=('Consolas', 11), bg=C['surface2'],
+                  fg=C['text'], relief='flat', highlightthickness=1, highlightbackground=C['border'],
+                  highlightcolor=C['accent'], insertbackground=C['accent'])
+    e.pack(fill='x', ipady=4)
+    msg = _tk.Label(win._v20_body, text='', font=_v20_font(9), bg=C['surface'], fg=C['text2'],
+                    wraplength=380, justify='left')
+    msg.pack(anchor='w', pady=(8, 0))
+
+    def go():
+        serial = var.get().strip()
+
+        def work():
+            try:
+                ok, text = cl.activate(serial)
+            except Exception as exc:
+                ok, text = False, str(exc)
+
+            def done():
+                if not win.winfo_exists():
+                    return
+                _ui_raw_conf(msg, text=text, fg=C['success'] if ok else C['danger'])
+                _v20_refresh_license_cluster(self)
+                _v20_apply_gates(self)
+            self._post_ui(0, done)
+        _v20_threading.Thread(target=work, daemon=True).start()
+    _v20_dialog_buttons(win, [(_TR('Fermer'), win.destroy, 'ghost'), ('OK', go, 'accent')])
+    e.focus_set()
+
+
+def _v20_plan_dialog(self):
+    gc = _v20_ensure_gc(self)
+    if gc is not None:
+        try:
+            gc._show_plan_dialog()
+            return
+        except Exception:
+            _v20_dbg()
+    _v20_about(self)
+
+
+# ----------------------------------------------------------------------
+# PART E — per-option gating (Free / Pro / Unlimited for team)
+# Every option below can be switched off per plan from the dashboard
+# ("Tool options by plan").  A locked option is enforced three ways:
+#   1. its controls are disabled and its title says "🔒 PRO" (or TEAM/OFF);
+#   2. its settings are held at the value that turns the feature off, so a
+#      stale settings file cannot switch it back on;
+#   3. the action itself refuses to run (start, connect, open tab, ...).
+# Unknown / not-yet-received gates mean "allowed" - exactly the behaviour
+# before this version.  The ids are shared with the website.
+# ----------------------------------------------------------------------
+_V20_OPTIONS = {
+    # id: (title source text, [(var attr, locked value), ...], [widget text sources])
+    'posting.configuration': ('Configuration', [], ['▶ Lancer la publication']),
+    'posting.target_page': ('Page FB', [('target_type_var', 'groupe')], ['Page FB']),
+    'posting.multi_group': ('Tous (chaque post → tous les groupes)', [('group_target_mode', 'rotation')],
+                            ['Tous (chaque post → tous les groupes)']),
+    'posting.time_between': ('Time between posts', [('interval_var', '5'), ('interval_max_var', '10')], []),
+    'posting.zip': ('Fichier ZIP depuis', [('_ui_src_zip_var', False)], ['\U0001f5d1 Vider la mémoire ZIP']),
+    'posting.csv': ('Fichiers CSV / XLSX', [('_ui_src_csv_var', False)],
+                    ['  \U0001f4c2  Glissez-déposez vos fichiers CSV/XLSX ici  ']),
+    'posting.mode': ('Mode de publication', [('mode_var', 1)], ['Fond coloré', 'Texte seul', 'Cycle :']),
+    'posting.max_posts': ('Nombre max de posts', [('max_posts_var', '0')], []),
+    'accounts.panel': ('Comptes Facebook', [], ['+ Ajouter un compte', 'Appliquer']),
+    'accounts.cookies': ('Importer cookies', [], ['Importer cookies', 'Exporter cookies']),
+    'accounts.proxy': ('Proxy par compte', [], []),
+    'accounts.fingerprint': ('Empreinte Profils', [('_v20_fp_var', False)], []),
+    'browser.hidden': ('Navigateurs cachés', [('headless_var', False)], []),
+    'browser.grid': ('Grille des navigateurs visibles', [('_ui_grid_var', False)], []),
+    'browser.parallel': ('How many browser you want to open one time', [('concurrent_browsers_var', '1')], []),
+    'browser.human_typing': ('Frappe humaine', [('_ui14_typing_var', False)], []),
+    'browser.human_variation': ('Variation humaine', [('human_delay_var', False)], []),
+    'browser.watchdog': ('Chien de garde', [('wd_enabled_var', False)], []),
+    'browser.anonymous': ('Posts Anonymes', [('anon_enabled_var', False)], []),
+    'tor_proxies': ('Réseau Tor & proxys', [('tor_var', False), ('proxy_enabled_var', False)],
+                    ['\U0001f4c2 Importer TXT', '\U0001f5d1 Effacer tout']),
+    'watermark': ('Watermark (logo sur images)', [('watermark_enabled_var', False)], []),
+    'working_hours': ('Horaires', [], ['+ Ajouter']),
+    'tab.auto': ('Mode automatique', [], []),
+    'tab.shorts': ('Montage vidéo Shorts', [], []),
+    'tab.freeid': ('Free ID', [], []),
+    'tab.log': ('Journal', [], []),
+    'tab.profiles': ('Profils', [], []),
+    'tab.invite': ('Inviter', [], []),
+    'auto.collect': ('Collecte', [], []),
+    'auto.comment': ('Commenter', [], []),
+    'auto.join': ('Rejoindre', [], ['▶ Rejoindre les groupes']),
+    'auto.like': ('Liker', [], []),
+    'auto.cleaner': ('Supprimer & Refuser', [], []),
+    'profiles.generate': ('Generate New Profile', [], []),
+    'profiles.fingerprint': ('Fingerprint', [], []),
+    'profiles.desktop_icon': ('Desktop icon', [], []),
+    'profiles.lang_screen': ('Language / Screen Size', [], []),
+}
+# titles whose widgets carry the lock mark (option -> title source texts)
+_V20_TITLES = {
+    'posting.configuration': ['Configuration'],
+    'posting.time_between': ['Time between posts'],
+    'posting.zip': ['Fichier ZIP depuis'],
+    'posting.csv': ['Fichiers CSV / XLSX'],
+    'posting.mode': ['Mode de publication'],
+    'posting.max_posts': ['Nombre max de posts'],
+    'accounts.panel': ['Comptes Facebook'],
+    'browser.hidden': ['Navigateurs cachés'],
+    'browser.grid': ['Grille des navigateurs visibles'],
+    'browser.parallel': ['How many browser you want to open one time'],
+    'browser.human_typing': ['Frappe humaine'],
+    'browser.human_variation': ['Variation humaine'],
+    'browser.watchdog': ['Chien de garde'],
+    'browser.anonymous': ['Posts Anonymes'],
+    'tor_proxies': ['Réseau Tor & proxys', 'Réseau Tor', 'Proxys par compte'],
+    'watermark': ['Watermark (logo sur images)'],
+    'working_hours': ['Horaires de travail', 'Plages horaires', 'Horaires'],
+}
+_V20_TAB_GATES = {'auto': 'tab.auto', 'shorts': 'tab.shorts', 'freeid': 'tab.freeid', 'journal': 'tab.log',
+                  'profiles': 'tab.profiles', 'invite': 'tab.invite'}
+for _v20_k, _v20_v in {
+    'Empreinte Profils': ('Profiles fingerprint', 'Huella de Perfiles', 'بصمة الملفات'),
+    'Proxy par compte': ('Proxy per account', 'Proxy por cuenta', 'بروكسي لكل حساب'),
+    'Supprimer & Refuser': ('Delete Post & Decline', 'Eliminar y rechazar', 'حذف ورفض'),
+    '\U0001f512 Option verrouillée': ('\U0001f512 Locked option', '\U0001f512 Opción bloqueada', '\U0001f512 خيار مقفل'),
+    '« %s » n\'est pas disponible avec le plan %s.': (
+        '“%s” is not available on the %s plan.', '« %s » no está disponible en el plan %s.',
+        '«%s» غير متاح في خطة %s.'),
+    'Disponible avec le plan %s.': ('Available on the %s plan.', 'Disponible en el plan %s.',
+                                    'متاح في خطة %s.'),
+    "Cette option est désactivée par l'administrateur.": (
+        'This option is switched off by the administrator.', 'Esta opción está desactivada por el administrador.',
+        'هذا الخيار معطل من المسؤول.'),
+    'Mettre à niveau': ('Upgrade', 'Mejorar', 'ترقية'),
+}.items():
+    _TRAW.setdefault(_v20_k, _v20_v)
+
+_V20_PLAN_NAMES = {'free': 'Free', 'pro': 'Pro', 'team': 'Unlimited for Team'}
+
+
+def _v20_allowed(self, option_id):
+    """Is this option allowed on the current plan? Unknown = allowed."""
+    cl = _v20_client(self)
+    if cl is None:
+        return True
+    try:
+        return bool(cl.feature_allowed(option_id))
+    except Exception:
+        return True
+
+
+def _v20_min_plan(self, option_id):
+    cl = _v20_client(self)
+    try:
+        return cl.feature_min_plan(option_id) if cl is not None else 'free'
+    except Exception:
+        return 'free'
+
+
+def _v20_lock_mark(self, option_id):
+    mp = _v20_min_plan(self, option_id)
+    return {'pro': 'PRO', 'team': 'TEAM'}.get(mp, 'OFF') if mp else 'OFF'
+
+
+def _v20_locked_popup(self, option_id):
+    """Say why - once every two seconds at most - and offer the upgrade."""
+    import tkinter as _tk
+    now = time.time()
+    if now - getattr(self, '_v20_popup_t', 0) < 2.0:
+        return
+    self._v20_popup_t = now
+    if not self._on_ui_thread():
+        self._post_ui(0, lambda: _v20_locked_popup(self, option_id))
+        return
+    spec = _V20_OPTIONS.get(option_id)
+    label = _TR(spec[0]) if spec else option_id
+    plan = _V20_PLAN_NAMES.get(_v20_plan(self), 'Free')
+    mp = _v20_min_plan(self, option_id)
+    win = _v20_dialog(self, _TR('\U0001f512 Option verrouillée'))
+    b = win._v20_body
+    _tk.Label(b, text=_TR('« %s » n\'est pas disponible avec le plan %s.') % (label, plan),
+              font=_v20_font(10), bg=C['surface'], fg=C['text'], wraplength=400, justify='left').pack(anchor='w')
+    sub = (_TR('Disponible avec le plan %s.') % _V20_PLAN_NAMES.get(mp, mp)) if mp \
+        else _TR("Cette option est désactivée par l'administrateur.")
+    _tk.Label(b, text=sub, font=_v20_font(9), bg=C['surface'], fg=C['text2'], wraplength=400,
+              justify='left').pack(anchor='w', pady=(6, 0))
+    specs = [(_TR('Fermer'), win.destroy, 'ghost')]
+    if mp:
+        specs.append((_TR('Mettre à niveau'), lambda: (win.destroy(), _v20_upgrade(self)), 'accent'))
+    _v20_dialog_buttons(win, specs)
+    try:
+        self.log('\U0001f512 %s — %s' % (label, sub))
+    except Exception:
+        pass
+
+
+def _v20_guard(self, option_id):
+    """True when allowed; otherwise explain and return False."""
+    if _v20_allowed(self, option_id):
+        return True
+    _v20_locked_popup(self, option_id)
+    return False
+
+
+def _v20_build_indexes(self):
+    """One walk over every section: {source text: [widgets]} and
+    {Tk variable name: [input widgets]}.  Cached; rebuilt on demand."""
+    sidx, vidx = {}, {}
+    roots = list((self._sections or {}).values())
+    sb = getattr(self, '_ui13_sidebar', None)
+    if sb is not None:
+        roots.append(sb)
+    seen = set()
+    for r in roots:
+        for w in _ui_walk(r):
+            if id(w) in seen:
+                continue
+            seen.add(id(w))
+            src = getattr(w, '_i18n_src', None)
+            if isinstance(src, str) and src:
+                sidx.setdefault(src, []).append(w)
+            try:
+                cls = w.winfo_class()
+                opt = 'textvariable' if cls in ('Entry', 'Spinbox', 'TCombobox') else \
+                    ('variable' if cls in ('Checkbutton', 'Radiobutton') else None)
+                if opt:
+                    name = str(w.cget(opt))
+                    if name:
+                        vidx.setdefault(name, []).append(w)
+            except Exception:
+                pass
+    self._v20_widx = sidx
+    self._v20_vidx = vidx
+    return sidx
+
+
+def _v20_widget_index(self):
+    idx = getattr(self, '_v20_widx', None)
+    return idx if idx is not None else _v20_build_indexes(self)
+
+
+def _v20_vars_widgets(self, var):
+    if getattr(self, '_v20_vidx', None) is None:
+        _v20_build_indexes(self)
+    return list(self._v20_vidx.get(str(var), []))
+
+
+def _v20_set_widget_lock(self, w, option_id, locked):
+    try:
+        cls = w.winfo_class()
+    except Exception:
+        return
+    if cls not in ('Entry', 'Spinbox', 'Checkbutton', 'Radiobutton', 'Button', 'TCombobox', 'Label'):
+        return
+    if locked:
+        if getattr(w, '_v20_lock', None) == option_id:
+            return
+        if cls != 'Label':
+            try:
+                w._v20_prev_state = str(w.cget('state'))
+                _ui_raw_conf(w, state='disabled') if cls != 'TCombobox' else w.configure(state='disabled')
+            except Exception:
+                pass
+        if not getattr(w, '_v20_click_bound', False):
+            try:
+                w.bind('<Button-1>', lambda e, s=self, ww=w: (_v20_locked_popup(s, ww._v20_lock), 'break')[1]
+                       if getattr(ww, '_v20_lock', None) else None, add='+')
+                w._v20_click_bound = True
+            except Exception:
+                pass
+        w._v20_lock = option_id
+    else:
+        if getattr(w, '_v20_lock', None) != option_id:
+            return
+        w._v20_lock = None
+        prev = getattr(w, '_v20_prev_state', None)
+        if prev and cls != 'Label':
+            try:
+                _ui_raw_conf(w, state=prev) if cls != 'TCombobox' else w.configure(state=prev)
+            except Exception:
+                pass
+
+
+def _v20_mark_title(self, w, option_id, locked):
+    """'Hidden browsers' -> 'Hidden browsers  🔒 PRO' (and back)."""
+    try:
+        src = getattr(w, '_i18n_src', None) or ''
+        base = _TR(src) if src else str(w.cget('text'))
+        if locked:
+            _ui_raw_conf(w, text='%s  \U0001f512 %s' % (base, _v20_lock_mark(self, option_id)))
+            w._v20_marked = option_id
+        elif getattr(w, '_v20_marked', None) == option_id:
+            _ui_raw_conf(w, text=base)
+            w._v20_marked = None
+    except Exception:
+        pass
+
+
+def _v20_var_guard(self, attr, value, option_id):
+    """Hold a Tk variable at its 'feature off' value while locked."""
+    var = getattr(self, attr, None)
+    if var is None:
+        return
+    if getattr(var, '_v20_traced', None) is None:
+        def on_write(*_a, v=var):
+            oid = getattr(v, '_v20_lockopt', None)
+            if not oid or getattr(v, '_v20_busy', False):
+                return
+            try:
+                cur = v.get()
+            except Exception:
+                return
+            want = getattr(v, '_v20_lockval', None)
+            if str(cur) != str(want):
+                v._v20_busy = True
+                try:
+                    v.set(want)
+                finally:
+                    v._v20_busy = False
+                if getattr(self, '_v20_ready', False):
+                    _v20_locked_popup(self, oid)
+        try:
+            var._v20_traced = var.trace_add('write', on_write)
+        except Exception:
+            var._v20_traced = False
+    var._v20_lockopt = option_id
+    var._v20_lockval = value
+    try:
+        if str(var.get()) != str(value):
+            if not hasattr(var, '_v20_before'):
+                var._v20_before = var.get()
+            var._v20_busy = True
+            try:
+                var.set(value)
+            finally:
+                var._v20_busy = False
+    except Exception:
+        pass
+
+
+def _v20_var_release(self, attr, option_id):
+    var = getattr(self, attr, None)
+    if var is None or getattr(var, '_v20_lockopt', None) != option_id:
+        return
+    var._v20_lockopt = None
+    if hasattr(var, '_v20_before'):
+        try:
+            var.set(var._v20_before)
+        except Exception:
+            pass
+        try:
+            del var._v20_before
+        except Exception:
+            pass
+
+
+def _v20_apply_gates(self):
+    """Apply the current gate matrix to the whole UI (idempotent)."""
+    if not getattr(self, '_ui13_done', False):
+        return
+    idx = _v20_widget_index(self)
+    locked_now = set()
+    for oid, (title, vars_, texts) in _V20_OPTIONS.items():
+        allowed = _v20_allowed(self, oid)
+        if not allowed:
+            locked_now.add(oid)
+        for attr, val in vars_:
+            try:
+                if allowed:
+                    _v20_var_release(self, attr, oid)
+                else:
+                    _v20_var_guard(self, attr, val, oid)
+                    var = getattr(self, attr, None)
+                    if var is not None:
+                        for w in _v20_vars_widgets(self, var):
+                            _v20_set_widget_lock(self, w, oid, True)
+            except Exception:
+                _v20_dbg()
+            if allowed:
+                var = getattr(self, attr, None)
+                if var is not None:
+                    for w in _v20_vars_widgets(self, var):
+                        _v20_set_widget_lock(self, w, oid, False)
+        for src in texts:
+            for w in idx.get(src, []):
+                _v20_set_widget_lock(self, w, oid, not allowed)
+        for src in _V20_TITLES.get(oid, []):
+            for w in idx.get(src, []):
+                if w.winfo_class() == 'Label':
+                    _v20_mark_title(self, w, oid, not allowed)
+    # sidebar rows of locked tabs
+    btns = getattr(self, '_tab_btns', None) or {}
+    for tab, oid in _V20_TAB_GATES.items():
+        pair = btns.get(tab)
+        if pair is None:
+            continue
+        lbl = pair[0]
+        try:
+            src = getattr(lbl, '_i18n_src', None) or str(lbl.cget('text'))
+            base = _TR(src)
+            if oid in locked_now:
+                _ui_raw_conf(lbl, text='%s   \U0001f512' % base)
+            else:
+                _ui_raw_conf(lbl, text=base)
+        except Exception:
+            pass
+    self._v20_locked = locked_now
+    # the Profiles tool applies its own part (fingerprint, icon, pools)
+    gc = getattr(self, '_v20_gc', None)
+    if gc is not None:
+        try:
+            gc._sync_feature_locks()
+        except Exception:
+            _v20_dbg()
+    try:
+        _ui13_tabs_draw(self)
+    except Exception:
+        pass
+    # the tab on screen may just have been locked
+    cur = getattr(self, '_current_tab', 'config')
+    if _V20_TAB_GATES.get(cur) in locked_now:
+        try:
+            self._show_tab('config')
+        except Exception:
+            pass
+
+
+def _v20_coerce_locked(self):
+    """Right before a run: every locked option at its 'off' value."""
+    for oid, (title, vars_, texts) in _V20_OPTIONS.items():
+        if _v20_allowed(self, oid):
+            continue
+        for attr, val in vars_:
+            var = getattr(self, attr, None)
+            if var is None:
+                continue
+            try:
+                if str(var.get()) != str(val):
+                    var._v20_busy = True
+                    try:
+                        var.set(val)
+                    finally:
+                        var._v20_busy = False
+            except Exception:
+                pass
+
+
+def _v20_wrap_method(name, option_ids, block_value=None):
+    """Class-level guard: the method runs only when every option is allowed."""
+    prev = getattr(FacebookMultiPosterApp, name, None)
+    if prev is None:
+        return
+
+    def guarded(self, *a, **kw):
+        for oid in option_ids:
+            if not _v20_allowed(self, oid):
+                _v20_locked_popup(self, oid)
+                return block_value
+        return prev(self, *a, **kw)
+    guarded.__name__ = name
+    guarded.__doc__ = getattr(prev, '__doc__', None)
+    setattr(FacebookMultiPosterApp, name, guarded)
+
+
+_v20_wrap_method('connect_account', ['accounts.panel'])
+_v20_wrap_method('connect_selected_accounts', ['accounts.panel'])
+_v20_wrap_method('_import_cookies_from_txt', ['accounts.cookies'])
+_v20_wrap_method('_export_cookies_to_txt', ['accounts.cookies'])
+_v20_wrap_method('_sc_start', ['tab.auto', 'auto.collect'])
+_v20_wrap_method('_cm_start', ['tab.auto', 'auto.comment'])
+
+# Automatic mode actions that are local closures (join, like) are guarded at
+# their start button; the cleaner is a module function.
+if callable(globals().get('_ui14_dd_start')):
+    _v20_prev_dd_start = _ui14_dd_start
+
+    def _ui14_dd_start(self):
+        if not _v20_guard(self, 'tab.auto') or not _v20_guard(self, 'auto.cleaner'):
+            return None
+        return _v20_prev_dd_start(self)
+
+
+def _v20_guard_button(self, btn, option_ids):
+    """Wrap a Tk Button's command: the original runs only when allowed."""
+    try:
+        old = str(btn.cget('command'))
+    except Exception:
+        return
+    if not old or getattr(btn, '_v20_btn_guard', None):
+        return
+
+    def run():
+        for oid in option_ids:
+            if not _v20_allowed(self, oid):
+                _v20_locked_popup(self, oid)
+                return None
+        return btn.tk.call(old)
+    btn._v20_btn_guard = tuple(option_ids)
+    _ui_raw_conf(btn, command=run)
+
+
+def _v20_guard_buttons(self):
+    idx = _v20_widget_index(self)
+    table = {
+        '▶ Rejoindre les groupes': ['tab.auto', 'auto.join'],
+        '♡ Lancer le like auto': ['tab.auto', 'auto.like'],
+        '▶ Lancer la publication': ['posting.configuration', 'accounts.panel'],
+        'Importer cookies': ['accounts.cookies'],
+        'Exporter cookies': ['accounts.cookies'],
+        '+ Ajouter': [],
+    }
+    for src, ids in table.items():
+        for w in idx.get(src, []):
+            if w.winfo_class() != 'Button':
+                continue
+            if src == '+ Ajouter':
+                # only the Working Hours "+ Add" (the URL list has its own)
+                try:
+                    sec = self._sections.get('horaires')
+                    if sec is None or not str(w).startswith(str(sec)):
+                        continue
+                except Exception:
+                    continue
+                ids = ['working_hours']
+            _v20_guard_button(self, w, ids)
+
+
+# posting: the gate, the coercion and (Part F) the ZIP link check
+_v20_prev_start_posting = FacebookMultiPosterApp.start_posting
+
+
+def _v20_start_posting(self, *a, **kw):
+    for oid in ('posting.configuration', 'accounts.panel'):
+        if not _v20_allowed(self, oid):
+            _v20_locked_popup(self, oid)
+            return None
+    _v20_coerce_locked(self)
+    self._v20_zip_report = None
+    return _v20_prev_start_posting(self, *a, **kw)
+
+
+FacebookMultiPosterApp.start_posting = _v20_start_posting
+
+# working hours locked -> the bot runs continuously (the schedule is ignored)
+_v20_prev_in_schedule = FacebookMultiPosterApp._is_in_schedule
+
+
+def _v20_is_in_schedule(self):
+    if not _v20_allowed(self, 'working_hours'):
+        return True
+    return _v20_prev_in_schedule(self)
+
+
+FacebookMultiPosterApp._is_in_schedule = _v20_is_in_schedule
+
+# per-account proxy locked -> the rotating list / Tor, as before v11
+_v20_prev_proxy_for_slot = FacebookMultiPosterApp._get_proxy_for_slot
+
+
+def _v20_proxy_for_slot(self, sid, *a, **kw):
+    if not _v20_allowed(self, 'accounts.proxy'):
+        try:
+            return _ui_orig_get_proxy_for_slot(self, sid, *a, **kw)
+        except Exception:
+            return None
+    return _v20_prev_proxy_for_slot(self, sid, *a, **kw)
+
+
+FacebookMultiPosterApp._get_proxy_for_slot = _v20_proxy_for_slot
+
+for _v20_fn_name in ('_ui_px_toggle', '_ui_px_editor'):
+    _v20_prev_fn = globals().get(_v20_fn_name)
+    if callable(_v20_prev_fn):
+        def _v20_make_px(prev):
+            def wrapped(self, sid, *a, **kw):
+                if not _v20_guard(self, 'accounts.proxy'):
+                    return None
+                return prev(self, sid, *a, **kw)
+            return wrapped
+        globals()[_v20_fn_name] = _v20_make_px(_v20_prev_fn)
+
+# tabs: a locked tab does not open
+_v20_prev_show_tab = FacebookMultiPosterApp._show_tab
+
+
+def _v20_show_tab(self, tab):
+    oid = _V20_TAB_GATES.get(tab)
+    if oid and getattr(self, '_v20_ready', False) and not _v20_allowed(self, oid):
+        _v20_locked_popup(self, oid)
+        return None
+    return _v20_prev_show_tab(self, tab)
+
+
+FacebookMultiPosterApp._show_tab = _v20_show_tab
+
+
+# ----------------------------------------------------------------------
+# PART F — Control ZIP Links
+# Each ZIP post folder holds comment.txt (the link), description.txt and
+# image.png.  Before anything is posted, every ZIP publication's link is
+# checked against the domains the dashboard allows for this plan.  An
+# unsupported link is NOT posted; the user is told which domains are
+# supported and where to get supported links.  When the dashboard has the
+# check switched off for this plan (or removed entirely), every link is
+# supported and ZIP posting behaves exactly as before.
+# ----------------------------------------------------------------------
+_V20_URL_RX = re.compile(r'(?:https?://|www\.)[^\s<>"\'«»]+'
+                         r'|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}/[^\s<>"\']*', re.I)
+
+
+def _v20_links_in(text):
+    return [m.group(0).rstrip('.,;:!?)]}’”') for m in _V20_URL_RX.finditer(text or '')]
+
+
+def _v20_host_of(link):
+    try:
+        l = link.strip()
+        if not re.match(r'^[a-z][a-z0-9+.-]*://', l, re.I):
+            l = 'http://' + l
+        host = (urlparse(l).hostname or '').lower().rstrip('.')
+        if host.startswith('www.'):
+            host = host[4:]
+        return host
+    except Exception:
+        return ''
+
+
+def _v20_link_supported(link, domains):
+    host = _v20_host_of(link)
+    if not host:
+        return False
+    for d in domains:
+        d = (d or '').lower().strip().lstrip('.')
+        if d.startswith('www.'):
+            d = d[4:]
+        if d and (host == d or host.endswith('.' + d)):
+            return True
+    return False
+
+
+def _v20_ziplinks_rules(self):
+    cl = _v20_client(self)
+    if cl is not None:
+        try:
+            return cl.ziplinks_rules()
+        except Exception:
+            _v20_dbg()
+    # no licence module at all (developer checkout / TAB mode): no check
+    return {'enforce': False, 'domains': [], 'check_description': False, 'apply_to_csv': False,
+            'message': '', 'url': 'https://mavelylink.com/', 'label': 'Get supported links', 'plan': 'free'}
+
+
+def _v20_pub_unsupported(pub, rules):
+    """The unsupported links of one publication ([] when it may be posted)."""
+    links = _v20_links_in(pub.get('commentaire') or '')
+    if rules.get('check_description'):
+        links += _v20_links_in(pub.get('texte') or '')
+    return [l for l in links if not _v20_link_supported(l, rules.get('domains') or [])]
+
+
+_v20_prev_load_publications = FacebookMultiPosterApp.load_publications
+
+
+def _v20_load_publications(self, *a, **kw):
+    pubs = _v20_prev_load_publications(self, *a, **kw)
+    try:
+        rules = _v20_ziplinks_rules(self)
+        if not rules.get('enforce') or not pubs:
+            return pubs
+        keep, bad = [], []
+        for p in pubs:
+            is_zip = _ui_is_zip_pub(p)
+            if not is_zip and not rules.get('apply_to_csv'):
+                keep.append(p)
+                continue
+            miss = _v20_pub_unsupported(p, rules)
+            if miss:
+                bad.append((p, miss))
+            else:
+                keep.append(p)
+        if bad:
+            for p, miss in bad:
+                try:
+                    name = os.path.basename(os.path.dirname(p.get('image') or '')) or '?'
+                    self.log('⛔ ZIP : lien non supporté — publication %s ignorée (%s)'
+                             % (name, ', '.join(miss[:3])))
+                except Exception:
+                    pass
+            self._v20_zip_report = (len(bad), len(pubs), rules, sorted(set(_v20_host_of(m) for _p, ms in bad
+                                                                          for m in ms))[:6])
+            # every publication was refused: our dialog explains it, so the
+            # generic "no publication" error that follows is not shown too
+            self._v20_nopub_zip = not keep
+            self._call_ui(_v20_ziplinks_popup, self, len(bad), len(pubs), rules)
+        return keep
+    except Exception:
+        _v20_dbg()
+        return pubs
+
+
+FacebookMultiPosterApp.load_publications = _v20_load_publications
+
+_TRAW.setdefault('Liens supportés :', ('Supported links:', 'Enlaces compatibles:', 'الروابط المدعومة:'))
+_TRAW.setdefault('%d publication(s) sur %d ignorée(s) : leur lien n\'est pas supporté.',
+                 ('%d of %d post(s) skipped: their link is not supported.',
+                  '%d de %d publicación(es) omitida(s): su enlace no es compatible.',
+                  'تم تخطي %d من %d منشور: الرابط غير مدعوم.'))
+_TRAW.setdefault('Lien non supporté', ('Link not supported', 'Enlace no compatible', 'رابط غير مدعوم'))
+
+
+def _v20_ziplinks_popup(self, nbad, ntotal, rules):
+    import tkinter as _tk
+    plan = _V20_PLAN_NAMES.get(rules.get('plan') or _v20_plan(self), 'Free')
+    msg = str(rules.get('message') or 'Your link is not supported in the {plan} version.')
+    try:
+        msg = msg.replace('{plan}', plan)
+    except Exception:
+        pass
+    win = _v20_dialog(self, _TR('Lien non supporté'), '⛔')
+    b = win._v20_body
+    _tk.Label(b, text=msg, font=_v20_font(11, 'bold'), bg=C['surface'], fg=C['danger'], wraplength=420,
+              justify='left').pack(anchor='w')
+    _tk.Label(b, text=_TR('%d publication(s) sur %d ignorée(s) : leur lien n\'est pas supporté.')
+              % (nbad, ntotal), font=_v20_font(9), bg=C['surface'], fg=C['text2'], wraplength=420,
+              justify='left').pack(anchor='w', pady=(6, 10))
+    _tk.Label(b, text=_TR('Liens supportés :'), font=_v20_font(9, 'bold'), bg=C['surface'],
+              fg=C['text']).pack(anchor='w')
+    box = _tk.Frame(b, bg=C['surface2'], highlightthickness=1, highlightbackground=C['border'], padx=10, pady=6)
+    box.pack(fill='x', pady=(4, 0))
+    for d in (rules.get('domains') or [])[:12]:
+        _tk.Label(box, text='https://' + d, font=('Consolas', 10), bg=C['surface2'], fg=C['accent'],
+                  anchor='w').pack(fill='x')
+    url = rules.get('url') or 'https://mavelylink.com/'
+    label = rules.get('label') or 'Get supported links'
+    _v20_dialog_buttons(win, [(_TR('Fermer'), win.destroy, 'ghost'),
+                              ('↗  ' + label, lambda: (_ui_open_url(url), win.destroy()), 'accent')])
+
+
+try:
+    _v20_real_showerror = messagebox.showerror
+
+    def _v20_showerror(title=None, message=None, **options):
+        app = globals().get('_CURRENT_APP')
+        if app is not None and getattr(app, '_v20_nopub_zip', False) and \
+                'Aucune publication' in str(message or ''):
+            app._v20_nopub_zip = False
+            return 'ok'
+        return _v20_real_showerror(title, message, **options)
+    messagebox.showerror = _v20_showerror
+except Exception:
+    _v20_dbg()
+
+# a language switch re-labels every widget from its source text: re-apply
+# the lock marks right after it
+_v20_prev_set_language = FacebookMultiPosterApp._set_language
+
+
+def _v20_set_language(self, lang):
+    r = _v20_prev_set_language(self, lang)
+    try:
+        if getattr(self, '_ui13_done', False):
+            _v20_apply_gates(self)
+            _v20_refresh_license_cluster(self)
+            cv = getattr(self, '_v20_ref_cv', None)
+            if cv is not None:
+                cv._ui_draw()
+            gc = getattr(self, '_v20_gc', None)
+            if gc is not None:
+                gc._set_language(lang if lang in ('en', 'es', 'fr', 'ar') else 'en')
+    except Exception:
+        _v20_dbg()
+    return r
+
+
+FacebookMultiPosterApp._set_language = _v20_set_language
+
+
+# ----------------------------------------------------------------------
+# PART C — Method 2: the Chrome Profile Generator, merged
+# The whole tool (Profiles, Invite, USA Timer, server tabs, licensing
+# dialogs, updates, the application master switch) runs inside the
+# "Profiles" page.  It is the real ChromeProfileGeneratorGUI, hosted in a
+# frame instead of its own window, fed with AutoPoster's colours, language
+# and licence client.  Its header (title, About, plan, language, theme) is
+# hidden because the AutoPoster top bar now carries those controls.
+# ----------------------------------------------------------------------
+_V20_GC_MOD = [None, False]          # (module, import attempted)
+
+
+def _v20_gc_module():
+    if not _V20_GC_MOD[1]:
+        _V20_GC_MOD[1] = True
+        try:
+            import Google_Chrome as _gcm
+            _V20_GC_MOD[0] = _gcm
+        except Exception:
+            _v20_dbg()
+            _V20_GC_MOD[0] = None
+    return _V20_GC_MOD[0]
+
+
+def _v20_gc_themes():
+    """The Profiles tool's palette, derived from AutoPoster's tokens."""
+    def pal(P, dark):
+        return {
+            'BG': P['bg'], 'BG_CARD': P['surface'], 'BG_CARD_2': P['surface3'] if not dark else P['surface2'],
+            'BORDER': P['border'], 'FG': P['text'], 'FG_MUTED': P['text2'],
+            'ACCENT': P['accent'], 'ACCENT_2': P['accent2'], 'GREEN': P['success'],
+            'DANGER': P['danger'], 'BANNER': '#1e1b4b' if not dark else '#1b1a3f',
+            'HEADER': P['surface'], 'ENTRY': P['surface2'] if not dark else P['surface3'],
+            'SELECT': P['accent'],
+        }
+    return {'light': pal(C_LIGHT, False), 'dark': pal(C_DARK, True)}
+
+
+class _V20GCHost(_AppFrame):
+    """The frame the Profiles tool treats as its root window.  Window-manager
+    calls are no-ops (inherited from _AppFrame); after() calls made from a
+    worker thread go through AutoPoster's UI queue (thread-safe)."""
+
+    def iconbitmap(self, *a, **kw):
+        return None
+
+    def protocol(self, *a, **kw):
+        return None
+
+    def wm_title(self, *a, **kw):
+        return ''
+
+
+def _v20_make_hosted_class(gcm):
+    base = gcm.ChromeProfileGeneratorGUI
+
+    class HostedProfiles(base):
+        """ChromeProfileGeneratorGUI hosted inside AutoPoster Pro."""
+
+        def __init__(self, root, app):
+            self._v20_app = app
+            self.THEMES = _v20_gc_themes()
+            base.__init__(self, root)
+
+        # --- theme and language follow AutoPoster -------------------
+        def _load_theme_name(self):
+            return 'dark' if _ui13_is_dark() else 'light'
+
+        def _save_theme_name(self, name):
+            return None
+
+        def _lang_code(self):
+            code = _LANG[0] if _LANG else 'en'
+            return code if code in ('en', 'es', 'fr', 'ar') else 'en'
+
+        def _set_language(self, code):
+            self._ui_lang = code
+            try:
+                self._retranslate()
+            except Exception:
+                pass
+
+        def _configure_style(self):
+            # one ttk theme for the whole application ('clam', which both
+            # tools style); AutoPoster's own ttk styles are re-applied after
+            base._configure_style(self)
+            try:
+                from tkinter import ttk as _ttk
+                st = _ttk.Style()
+                flat = dict(lightcolor=self.BG, darkcolor=self.BG, bordercolor=self.BG)
+                st.configure('TNotebook', background=self.BG, borderwidth=0, tabmargins=(0, 4, 0, 0), **flat)
+                st.configure('TNotebook.Tab', background=self.BG, foreground=self.FG_MUTED, borderwidth=0,
+                             padding=(16, 6), font=_v20_font(9, 'bold'), lightcolor=self.BG,
+                             darkcolor=self.BG, bordercolor=self.BG, focuscolor=self.BG)
+                st.map('TNotebook.Tab',
+                       background=[('selected', self.BG_CARD), ('active', self.BG_CARD_2)],
+                       foreground=[('selected', self.ACCENT), ('active', self.FG)],
+                       lightcolor=[('selected', self.BG_CARD)], bordercolor=[('selected', self.BORDER)])
+                st.configure('Horizontal.TProgressbar', troughcolor=self.BG_CARD_2, background=self.ACCENT,
+                             bordercolor=self.BG_CARD_2, lightcolor=self.ACCENT, darkcolor=self.ACCENT,
+                             thickness=8)
+                for name in ('TEntry', 'TSpinbox', 'TCombobox'):
+                    st.configure(name, bordercolor=self.BORDER, lightcolor=self.ENTRY, darkcolor=self.ENTRY)
+                    st.map(name, bordercolor=[('focus', self.ACCENT)], lightcolor=[('focus', self.ENTRY)])
+                st.configure('Vertical.TScrollbar', background=self.BG_CARD_2, troughcolor=self.BG_CARD,
+                             bordercolor=self.BG_CARD, lightcolor=self.BG_CARD_2, darkcolor=self.BG_CARD_2,
+                             arrowcolor=self.FG_MUTED, gripcount=0)
+                st.map('Vertical.TScrollbar', background=[('active', self.BORDER)])
+            except Exception:
+                _v20_dbg()
+            _v20_restyle_ttk(self._v20_app)
+
+        def _create_widgets(self):
+            base._create_widgets(self)
+            # the header row moved into AutoPoster's top bar
+            try:
+                for w in self.root.grid_slaves(row=0):
+                    w.grid_remove()
+            except Exception:
+                pass
+            try:
+                self.notebook.bind('<<NotebookTabChanged>>',
+                                   lambda e: _v20_gc_tab_changed(self._v20_app), add='+')
+            except Exception:
+                pass
+
+        def _refresh_remote_tabs(self):
+            # hosted: the start-up / plan-change refresh is silent (no
+            # "Tabs refreshed." toast every time the application starts)
+            host = getattr(self, 'tab_host', None)
+            if host is None:
+                return
+            try:
+                host.refresh_async(silent=True)
+            except Exception:
+                _v20_dbg()
+
+        # --- plan / licence ------------------------------------------
+        def _refresh_plan_ui(self):
+            base._refresh_plan_ui(self)
+            app = self._v20_app
+            try:
+                _v20_refresh_license_cluster(app)
+                _v20_apply_gates(app)
+            except Exception:
+                _v20_dbg()
+
+        def _sync_feature_locks(self):
+            base._sync_feature_locks(self)
+            app = self._v20_app
+            try:
+                if not _v20_allowed(app, 'profiles.fingerprint'):
+                    sw = getattr(self, '_fp_switch', None)
+                    if sw is not None:
+                        sw.set_enabled(False)
+                        sw.set_locked_command(lambda: _v20_locked_popup(app, 'profiles.fingerprint'))
+                    self.show_fp_var.set(False)
+                if not _v20_allowed(app, 'profiles.desktop_icon'):
+                    sw = getattr(self, '_shortcut_switch', None)
+                    if sw is not None:
+                        sw.set_enabled(False)
+                        sw.set_locked_command(lambda: _v20_locked_popup(app, 'profiles.desktop_icon'))
+                    self.create_shortcut_var.set(False)
+                elif getattr(self, '_shortcut_switch', None) is not None:
+                    self._shortcut_switch.set_enabled(True)
+                    self._shortcut_switch.set_locked_command(None)
+                if not _v20_allowed(app, 'profiles.lang_screen'):
+                    for coll in (getattr(self, '_lang_switches', {}), getattr(self, '_res_switches', {})):
+                        for ls in coll.values():
+                            ls.set_enabled(False)
+                            ls.set_locked_command(lambda: _v20_locked_popup(app, 'profiles.lang_screen'))
+            except Exception:
+                _v20_dbg()
+
+        def _generate_profiles(self):
+            if not _v20_guard(self._v20_app, 'tab.profiles') or \
+                    not _v20_guard(self._v20_app, 'profiles.generate'):
+                return None
+            return base._generate_profiles(self)
+
+        def _apply_referral_state(self, state, from_cache=False):
+            base._apply_referral_state(self, state, from_cache)
+            app = self._v20_app
+            try:
+                app._v20_ref_state = dict(state or {})
+                cv = getattr(app, '_v20_ref_cv', None)
+                if cv is not None:
+                    cv._ui_draw()
+            except Exception:
+                pass
+
+        # --- window-level behaviour ----------------------------------
+        def _center_popup(self, win):
+            try:
+                top = self.root.winfo_toplevel()
+                win.update_idletasks()
+                w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+                x = top.winfo_rootx() + max(0, (top.winfo_width() - w) // 2)
+                y = top.winfo_rooty() + max(0, (top.winfo_height() - h) // 3)
+                win.geometry('+%d+%d' % (x, y))
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
+
+        def _hard_exit(self):
+            """'Close app' from the admin-disabled screen closes AutoPoster."""
+            try:
+                client = self.generator.license()
+                if client is not None:
+                    client.stop_background()
+            except Exception:
+                pass
+            _v20_quit(self._v20_app)
+
+        def _show_application_disabled(self, client):
+            _v20_stop_all_tasks(self._v20_app, _TR("Application désactivée par l'administrateur."))
+            return base._show_application_disabled(self, client)
+
+        def _on_close(self):
+            try:
+                host = getattr(self, 'tab_host', None)
+                if host is not None:
+                    host.shutdown()
+            except Exception:
+                pass
+            try:
+                self.generator.stop_memory_watchdog()
+            except Exception:
+                pass
+
+    return HostedProfiles
+
+
+def _v20_restyle_ttk(app):
+    """AutoPoster's ttk styles (progress bars, scroll bars, combos) in the
+    current theme - needed after the Profiles tool (re)configures ttk."""
+    if app is None:
+        return
+    for fn in (globals().get('_ui_style_ttk'), globals().get('_ui13_progress_style')):
+        try:
+            if fn is not None:
+                fn(app)
+        except Exception:
+            pass
+    try:
+        fn = globals().get('_sv_pstyle')
+        if fn is not None:
+            fn()
+    except Exception:
+        pass
+
+
+def _v20_gc_section(self):
+    """The Profiles page: one card-less host that fills the page."""
+    import tkinter as _tk
+    if 'gc_host' in (self._sections or {}):
+        return self._sections['gc_host']
+    S = _tk.Frame(self._body_root, bg=C['bg'])
+    self._sections['gc_host'] = S
+    ph = _tk.Label(S, text='◉  ' + _TR('Profils') + '…', font=_v20_font(11), bg=C['bg'], fg=C['text3'])
+    ph._i18n_src = None
+    ph.place(relx=0.5, rely=0.4, anchor='center')
+    self._v20_gc_placeholder = ph
+    return S
+
+
+def _v20_ensure_gc(self):
+    """Build the Profiles tool now if it is not built yet. Returns it."""
+    gc = getattr(self, '_v20_gc', None)
+    if gc is not None or not getattr(self, '_standalone', False):
+        return gc
+    if getattr(self, '_v20_gc_failed', False) or getattr(self, '_v20_gc_building', False):
+        return None
+    gcm = _v20_gc_module()
+    if gcm is None:
+        self._v20_gc_failed = True
+        return None
+    _v20_patch_tab_toasts()
+    self._v20_gc_building = True
+    try:
+        cl = _v20_client(self)
+        if cl is not None:
+            gcm._SHARED_LICENSE_CLIENT = cl
+        S = _v20_gc_section(self)
+        host = _V20GCHost(S, bg=C['bg'])
+        try:
+            host._cross_thread_sink = self._post_ui
+            host._tracker_ui_ident = self._ui_thread_id
+        except Exception:
+            pass
+        host.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        cls = _v20_make_hosted_class(gcm)
+        gc = cls(host, self)
+        self._v20_gc = gc
+        self._v20_gc_host = host
+        ph = getattr(self, '_v20_gc_placeholder', None)
+        if ph is not None:
+            try:
+                ph.destroy()
+            except Exception:
+                pass
+        # the Profiles tool created its own licence client if ours was not
+        # ready yet: adopt it so there is exactly one
+        try:
+            mine = gc.generator.license()
+            if cl is None and mine is not None:
+                self._v20_client_obj = mine
+                gcm._SHARED_LICENSE_CLIENT = mine
+                _v20_apply_gates(self)
+                _v20_refresh_license_cluster(self)
+        except Exception:
+            pass
+        _v20_restyle_ttk(self)
+        try:
+            st = (_v20_client(self).referral or {}) if _v20_client(self) is not None else {}
+            if st:
+                self._v20_ref_state = dict(st)
+                cv = getattr(self, '_v20_ref_cv', None)
+                if cv is not None:
+                    cv._ui_draw()
+        except Exception:
+            pass
+        return gc
+    except Exception:
+        _v20_dbg()
+        self._v20_gc_failed = True
+        try:
+            self.log('❌ Profiles : ' + traceback.format_exc().strip().splitlines()[-1])
+        except Exception:
+            pass
+        return None
+    finally:
+        self._v20_gc_building = False
+
+
+def _v20_gc_select(self, which):
+    gc = _v20_ensure_gc(self)
+    if gc is None:
+        return
+    try:
+        tab = gc.invite_tab if which == 'invite' else gc.profiles_tab
+        if tab is not None:
+            self._v20_gc_switching = True
+            try:
+                gc.notebook.select(tab)
+            finally:
+                self._v20_gc_switching = False
+    except Exception:
+        _v20_dbg()
+
+
+def _v20_gc_tab_changed(self):
+    """The Profiles page's inner tabs drive the sidebar highlight; a locked
+    Invite tab bounces back to Profiles with an explanation."""
+    if getattr(self, '_v20_gc_switching', False):
+        return
+    gc = getattr(self, '_v20_gc', None)
+    if gc is None:
+        return
+    try:
+        cur = gc.notebook.nametowidget(gc.notebook.select())
+    except Exception:
+        return
+    want = 'invite' if cur is getattr(gc, 'invite_tab', None) else 'profiles'
+    if want == 'invite' and not _v20_allowed(self, 'tab.invite'):
+        _v20_gc_select(self, 'profiles')
+        _v20_locked_popup(self, 'tab.invite')
+        return
+    if getattr(self, '_current_tab', None) in ('profiles', 'invite') and self._current_tab != want:
+        self._current_tab = want
+        try:
+            self._highlight_tabs()
+        except Exception:
+            pass
+
+
+def _v20_open_nav(self, key):
+    """Sidebar / tab-strip navigation, Method 1 and Method 2 alike."""
+    if key in ('profiles', 'invite'):
+        oid = _V20_TAB_GATES[key]
+        if not _v20_allowed(self, oid) or not _v20_allowed(self, 'tab.profiles'):
+            _v20_locked_popup(self, oid if not _v20_allowed(self, oid) else 'tab.profiles')
+            return
+        self._show_tab(key)
+        _v20_gc_select(self, key)
+        return
+    self._show_tab(key)
+
+
+def _v20_layout_profiles(self, body_w, body_h):
+    S = _v20_gc_section(self)
+    m = _UI13_M
+    S.place(x=m, y=m, width=max(100, body_w - 2 * m), height=max(100, body_h - 2 * m))
+    try:
+        _ui13_raise(S)
+    except Exception:
+        pass
+    return body_h
+
+
+_v20_prev_layout_grid = FacebookMultiPosterApp._layout_grid
+
+
+def _v20_layout_grid(self, tab, force=True):
+    spec = _TAB_LAYOUT.get(tab) or {}
+    if spec.get('kind') != 'profiles20':
+        return _v20_prev_layout_grid(self, tab, force)
+    try:
+        body_w = int(self._body_canvas.winfo_width())
+        body_h = int(self._body_canvas.winfo_height())
+    except Exception:
+        body_w = body_h = 0
+    if body_w < 300 or body_h < 150:
+        return True
+    total = _v20_layout_profiles(self, body_w, body_h)
+    self._set_body_height(total)
+    try:
+        _ui13_vsb_show(self, False)
+    except Exception:
+        pass
+    return True
+
+
+FacebookMultiPosterApp._layout_grid = _v20_layout_grid
+
+# the Profiles page opens the tool on first view if it is not built yet
+_v20_prev_show_tab2 = FacebookMultiPosterApp._show_tab
+
+
+def _v20_show_tab2(self, tab):
+    r = _v20_prev_show_tab2(self, tab)
+    if tab in ('profiles', 'invite') and getattr(self, '_current_tab', None) == tab:
+        if getattr(self, '_v20_gc', None) is None:
+            try:
+                self.root.after(10, lambda: (_v20_ensure_gc(self), _v20_gc_select(self, tab)))
+            except Exception:
+                pass
+    try:
+        _v20_recolor_tabbar_caption(self)
+    except Exception:
+        pass
+    return r
+
+
+FacebookMultiPosterApp._show_tab = _v20_show_tab2
+
+
+def _v20_recolor_tabbar_caption(self):
+    cap = getattr(self, '_v20_tab_caption', None)
+    if cap is not None:
+        _ui_raw_conf(cap, text=_TR(_V20_METHOD_SRC[_v20_method_of(getattr(self, '_current_tab', 'config'))]))
+
+
+# ----------------------------------------------------------------------
+# PART C.3 — the Profiles fingerprint for Facebook accounts
+# With "Profiles fingerprint" on, every Facebook account gets its OWN
+# fingerprint from the Profiles engine (user agent, languages, screen,
+# timezone, WebGL / WebGPU, canvas / audio noise, fonts, plugins, battery,
+# connection, speech voices ...), generated once and kept in the account's
+# profile folder so it never changes between sessions.  It is applied with
+# the very same injection script the Profiles tool puts in its profiles.
+# Off (default) = the account fingerprint AutoPoster always used.
+# ----------------------------------------------------------------------
+_V20_FP_FILE = '_profiles_fingerprint.json'
+_V20_FP_LOCK = _v20_threading.Lock()
+_V20_FP_GEN = [None]
+
+
+def _v20_fp_generator():
+    """A lightweight Profiles generator for fingerprints only (no folders,
+    no browser backups): the generator's pools, fixed to the tool's fr-FR
+    Facebook locale so the language headers stay consistent."""
+    gcm = _v20_gc_module()
+    if gcm is None:
+        return None
+    with _V20_FP_LOCK:
+        if _V20_FP_GEN[0] is None:
+            G = gcm.ChromeProfileGenerator
+            g = G.__new__(G)
+            g.screen_resolutions = list(G.DEFAULT_RESOLUTIONS)
+            g.languages = ['fr-FR']
+            try:
+                g.user_agents = g._get_user_agents()
+            except Exception:
+                g.user_agents = ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                                 '(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36']
+            # windows-only user agents: the browser really runs on Windows
+            win = [u for u in g.user_agents if 'Windows' in u]
+            if win:
+                g.user_agents = win
+            g.timezones = ['Europe/Paris', 'Europe/Brussels', 'Europe/Luxembourg', 'Europe/Monaco',
+                           'America/Montreal', 'America/Toronto']
+            g.color_schemes = ['light', 'dark']
+            g.motion_preferences = ['no-preference', 'reduce']
+            _V20_FP_GEN[0] = g
+        return _V20_FP_GEN[0]
+
+
+def _v20_account_fp(user_data_dir):
+    """(context options, init script) for this account, created once."""
+    g = _v20_fp_generator()
+    if g is None:
+        return None
+    path = os.path.join(user_data_dir, _V20_FP_FILE)
+    fp = None
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            fp = _v20_json.load(fh)
+    except Exception:
+        fp = None
+    if not isinstance(fp, dict) or not fp.get('user_agent'):
+        fp = g._generate_fingerprint()
+        try:
+            os.makedirs(user_data_dir, exist_ok=True)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                _v20_json.dump(fp, fh, default=str)
+            os.replace(tmp, path)
+        except Exception:
+            _v20_dbg()
+    try:
+        bat = fp.get('battery') or {}
+        if isinstance(bat.get('dischargingTime'), str):
+            bat['dischargingTime'] = float('inf')
+    except Exception:
+        pass
+    return g.playwright_fingerprint(fp)
+
+
+_v20_prev_launch_ctx = FacebookMultiPosterApp._launch_ctx
+_V20_FP_TLS = _v20_threading.local()
+
+
+def _v20_launch_ctx(self, pw, user_data_dir, headless=None, extra_args=None, sid=None, **extra_kw):
+    use = False
+    try:
+        var = getattr(self, '_v20_fp_var', None)
+        use = (sid is not None and var is not None and bool(var.get())
+               and _v20_allowed(self, 'accounts.fingerprint'))
+    except Exception:
+        use = False
+    bundle = None
+    if use:
+        try:
+            bundle = _v20_account_fp(user_data_dir)
+        except Exception:
+            _v20_dbg()
+    if not bundle:
+        return _v20_prev_launch_ctx(self, pw, user_data_dir, headless=headless, extra_args=extra_args,
+                                    sid=sid, **extra_kw)
+    opts, js = bundle
+    kw = dict(extra_kw)
+    for k in ('timezone_id', 'color_scheme'):
+        if k in opts and k not in kw:
+            kw[k] = opts[k]
+    # Launch through the normal chain (proxy, Tor, grid, watchdog ...).
+    # While it runs, in THIS thread only, the legacy account fingerprint
+    # takes the Profiles user agent and its own init script steps aside,
+    # so the two engines never mix in one page.
+    _V20_FP_TLS.ua = opts.get('user_agent')
+    try:
+        ctx = _v20_prev_launch_ctx(self, pw, user_data_dir, headless=headless, extra_args=extra_args,
+                                   sid=sid, **kw)
+    finally:
+        _V20_FP_TLS.ua = None
+    try:
+        ctx.add_init_script(js)
+    except Exception:
+        _v20_dbg()
+    try:
+        self.log('  \U0001f6e1 Compte %s \u2014 empreinte Profils appliqu\u00e9e.' % sid)
+    except Exception:
+        pass
+    return ctx
+
+
+
+# while a Profiles fingerprint is being applied (this thread only), the
+# legacy per-account fingerprint yields its user agent to it and its own
+# init script becomes a no-op, so the two never mix in one page.
+if hasattr(FacebookMultiPosterApp, '_get_account_fingerprint'):
+    _v20_prev_get_fp = FacebookMultiPosterApp._get_account_fingerprint
+
+    def _v20_get_account_fp(self, sid, *a, **kw):
+        fp = _v20_prev_get_fp(self, sid, *a, **kw)
+        ua = getattr(_V20_FP_TLS, 'ua', None)
+        if ua and isinstance(fp, dict):
+            m = re.search(r'Chrome/([\d.]+)', ua)
+            fp = dict(fp)
+            if m:
+                fp['chrome_full'] = m.group(1)
+                fp['chrome_short'] = m.group(1).split('.')[0]
+            fp['_v20_ua'] = ua
+        return fp
+    FacebookMultiPosterApp._get_account_fingerprint = _v20_get_account_fp
+
+if hasattr(FacebookMultiPosterApp, '_fingerprint_script'):
+    _v20_prev_fp_script = FacebookMultiPosterApp._fingerprint_script
+
+    def _v20_fp_script(self, fp, *a, **kw):
+        if getattr(_V20_FP_TLS, 'ua', None):
+            return '/* profiles fingerprint active */'
+        return _v20_prev_fp_script(self, fp, *a, **kw)
+    FacebookMultiPosterApp._fingerprint_script = _v20_fp_script
+
+FacebookMultiPosterApp._launch_ctx = _v20_launch_ctx
+
+
+def _v20_build_fp_switch(self):
+    """'🛡 Profiles fingerprint' switch in the Facebook Accounts header."""
+    import tkinter as _tk
+    if getattr(self, '_v20_fp_switch', None) is not None:
+        return
+    if getattr(self, '_v20_fp_var', None) is None:
+        self._v20_fp_var = _tk.BooleanVar(value=bool(_v20_settings_get('profiles_fp', False)))
+        self._v20_fp_var.trace_add('write', lambda *a: _v20_settings_set(
+            'profiles_fp', bool(self._v20_fp_var.get())))
+    A = (self._sections or {}).get('comptes')
+    cnt = getattr(self, '_acc_count_lbl', None)
+    if A is None or cnt is None:
+        return
+    hdr = cnt.master
+    ref = None
+    try:
+        CM = self._sections.get('commenter')
+        ref = _ui14_find(CM, lambda w: w.winfo_class() == 'Checkbutton'
+                         and getattr(w, '_ui_skin', None) == 'switch') if CM else None
+    except Exception:
+        ref = None
+    text = '\U0001f6e1 ' + _TR('Empreinte Profils')
+    if ref is not None:
+        sw = _ui14_clone(ref, hdr, text=text, variable=self._v20_fp_var)
+    else:
+        sw = _tk.Checkbutton(hdr, text=text, variable=self._v20_fp_var, bg=C['surface'], fg=C['text2'],
+                             font=(_F13, 8), selectcolor=C['surface'], activebackground=C['surface'],
+                             bd=0, highlightthickness=0)
+    sw._i18n_src = None
+    try:
+        sw.pack(side='right', padx=(0, 10), before=cnt)
+    except Exception:
+        sw.pack(side='right', padx=(0, 10))
+    self._v20_fp_switch = sw
+    self._v20_widx = None                     # the index must learn this widget
+
+
+# ------------------------------------------- small v20 settings file
+_V20_SETTINGS = {}
+
+
+def _v20_settings_path():
+    return os.path.join(SESSION_BASE, 'v20_settings.json')
+
+
+def _v20_settings_load():
+    try:
+        with open(_v20_settings_path(), 'r', encoding='utf-8') as fh:
+            d = _v20_json.load(fh)
+        if isinstance(d, dict):
+            _V20_SETTINGS.update(d)
+    except Exception:
+        pass
+
+
+def _v20_settings_get(key, default=None):
+    if not _V20_SETTINGS:
+        _v20_settings_load()
+    return _V20_SETTINGS.get(key, default)
+
+
+def _v20_settings_set(key, value):
+    _V20_SETTINGS[key] = value
+    try:
+        os.makedirs(SESSION_BASE, exist_ok=True)
+        tmp = _v20_settings_path() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            _v20_json.dump(_V20_SETTINGS, fh)
+        os.replace(tmp, _v20_settings_path())
+    except Exception:
+        pass
+
+
+def _v20_patch_tab_toasts():
+    """Server-tab notices use AutoPoster's toast when hosted (their own one
+    positions itself on the Profiles frame, which may be hidden)."""
+    try:
+        import mavely_tabs as _mt
+    except Exception:
+        return
+    if getattr(_mt.TabHost, '_v20_toast', False):
+        return
+    prev = _mt.TabHost.toast
+
+    def toast(host, message):
+        app = getattr(getattr(host, 'gui', None), '_v20_app', None)
+        if app is not None:
+            try:
+                app.show_toast(str(message), 'info')
+                return
+            except Exception:
+                pass
+        return prev(host, message)
+    _mt.TabHost.toast = toast
+    _mt.TabHost._v20_toast = True
+
+
+# ----------------------------------------------------------------------
+# registration: Method 2 pages in the sidebar and the tab system
+# ----------------------------------------------------------------------
+for _v20_t in (('profiles', 'Profils', '◉'), ('invite', 'Inviter', '✉')):
+    if _v20_t[0] not in [t[0] for t in _TAB_DEF]:
+        _TAB_DEF.append(_v20_t)
+_TAB_SECTIONS['profiles'] = ['gc_host']
+_TAB_SECTIONS['invite'] = ['gc_host']
+_SECTION_TAB['gc_host'] = 'profiles'
+_TAB_LAYOUT['profiles'] = {'kind': 'profiles20', 'sections': ['gc_host']}
+_TAB_LAYOUT['invite'] = {'kind': 'profiles20', 'sections': ['gc_host']}
+
+
+# sidebar rows and tab strip go through _v20_open_nav (gates + Profiles tabs)
+_v20_prev_install_tabs = FacebookMultiPosterApp._install_tabs
+
+
+def _v20_install_tabs(self, *a, **kw):
+    r = _v20_prev_install_tabs(self, *a, **kw)
+    for key, (lbl, _bar) in (getattr(self, '_tab_btns', None) or {}).items():
+        try:
+            lbl.bind('<Button-1>', lambda e, k=key: (_v20_open_nav(self, k), 'break')[1])
+        except Exception:
+            pass
+    return r
+
+
+FacebookMultiPosterApp._install_tabs = _v20_install_tabs
+
+
+# ------------------------------------------------------------ finish
+_v20_prev_finish = _ui13_finish
+
+
+def _ui13_finish(self):
+    _v20_prev_finish(self)
+    if getattr(self, '_v20_done', False):
+        return
+    self._v20_done = True
+    steps = [_v20_densify, _v20_style_sidebar, _v20_build_referral_cta, _v20_gc_section, _v20_build_fp_switch]
+    if getattr(self, '_standalone', False):
+        steps.insert(0, _v20_topbar)
+    for fn in steps:
+        try:
+            fn(self)
+        except Exception:
+            _v20_dbg()
+    try:
+        _v20_build_indexes(self)
+        _v20_guard_buttons(self)
+    except Exception:
+        _v20_dbg()
+    _v20_start_license(self)
+    try:
+        self.root.after(4000, lambda: setattr(self, '_v20_ready', True))
+        self.root.after(60, lambda: _v20_default_density(self))
+        self.root.after(5000, _v20_png_cache_save)
+        if getattr(self, '_standalone', False):
+            # the Profiles tool starts shortly after the window is up: its
+            # check-in, update and referral watchers then run for the whole
+            # application, whichever page is on screen
+            self.root.after(1500, lambda: _v20_ensure_gc(self))
+    except Exception:
+        pass
+    try:
+        self._ui_layout_sig = None
+        self._show_tab(getattr(self, '_current_tab', None) or 'config')
+    except Exception:
+        _v20_dbg()
+
+
+# ----------------------------------------------------------- recolor
+_v20_prev_recolor = FacebookMultiPosterApp._ui_recolor
+
+
+def _v20_recolor(self):
+    _v20_prev_recolor(self)
+    if not getattr(self, '_v20_done', False):
+        return
+    try:
+        _v20_recolor_chrome(self)
+    except Exception:
+        _v20_dbg()
+    try:
+        cv = getattr(self, '_v20_ref_cv', None)
+        if cv is not None:
+            cv._ui_draw()
+    except Exception:
+        pass
+    gc = getattr(self, '_v20_gc', None)
+    if gc is not None:
+        want = 'dark' if _ui13_is_dark() else 'light'
+        try:
+            gc.THEMES = _v20_gc_themes()
+            if getattr(gc, 'theme_name', None) != want:
+                gc._toggle_theme(want)
+            _ui_raw_conf(self._v20_gc_host, bg=C['bg'])
+            S = (self._sections or {}).get('gc_host')
+            if S is not None:
+                _ui_raw_conf(S, bg=C['bg'])
+        except Exception:
+            _v20_dbg()
+    _v20_restyle_ttk(self)
+    try:
+        _v20_apply_gates(self)
+    except Exception:
+        _v20_dbg()
+
+
+FacebookMultiPosterApp._ui_recolor = _v20_recolor
+
+
+# -------------------------------------------------- teardown / close
+_v20_prev_teardown2 = FacebookMultiPosterApp.teardown
+
+
+def _v20_teardown2(self, *a, **kw):
+    gc = getattr(self, '_v20_gc', None)
+    if gc is not None:
+        try:
+            gc._on_close()
+        except Exception:
+            pass
+    cl = _v20_client(self)
+    if cl is not None:
+        try:
+            cl.stop_background()
+        except Exception:
+            pass
+    return _v20_prev_teardown2(self, *a, **kw)
+
+
+FacebookMultiPosterApp.teardown = _v20_teardown2
+
+
+# ------------------------------------------------------ entry points
+# Profile shortcuts and the Profiles tool's helper processes start the
+# application EXE with --launch-profile NAME / --run-script PATH (a frozen
+# build has no separate python).  They are served before any window opens.
+_v20_prev_main = main
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) >= 2 and args[0] in ('--launch-profile', '--run-script'):
+        gcm = _v20_gc_module()
+        if gcm is not None:
+            if args[0] == '--launch-profile':
+                try:
+                    if _v20_lic is not None:
+                        _v20_lic.APP_VERSION = _V20_CHECKIN_VERSION
+                except Exception:
+                    pass
+                sys.exit(gcm._self_launch_profile(args[1]))
+            import runpy
+            script = args[1]
+            sys.argv = [script] + args[2:]
+            try:
+                runpy.run_path(script, run_name='__main__')
+            except SystemExit:
+                raise
+            except Exception as exc:
+                print('run-script failed:', exc)
+            return 0
+    return _v20_prev_main()
+
+
+# ----------------------------------------------------------------------
+# PART B (cont.) — compact Configuration page
+#
+#   ┌ Configuration ─────────────────────────┐ ┌ Browser Settings ──────┐
+#   │ Target · URLs · multi-group │ ZIP file │ │ (two inner columns)    │
+#   │ Time between posts          │ CSV/XLSX │ ├ Tor & Proxies│Watermark┤
+#   │ Posting mode                │ Max posts│ ├ Working Hours ─────────┤
+#   │                             │ ▶ Start  │ │                        │
+#   ├ Facebook Accounts ─────────────────────┤ │                        │
+#   │ table (fills the remaining height)     │ │                        │
+#   └────────────────────────────────────────┘ └────────────────────────┘
+#
+# The Configuration card keeps every widget where the app created it; the
+# "sources & run" rows are only moved into a second inner column (grid ->
+# place inside the same card), and put back when the window is narrow.
+# ----------------------------------------------------------------------
+_V20_WIDE = 1000            # body width from which the compact page is used
+_V20_B_MIN, _V20_B_MAX = 400, 470
+
+
+def _v20_densify(self):
+    """Tighter vertical rhythm in the posting pages (once)."""
+    if getattr(self, '_v20_dense', False):
+        return
+    self._v20_dense = True
+    names = ('campagne', 'horaires', 'comptes', 'collecte', 'commenter', 'rejoindre', 'liker')
+    c3 = getattr(self, '_ui_cfg3', None) or {}
+    roots = [self._sections.get(n) for n in names if self._sections.get(n) is not None]
+    roots += [p for (_t, p) in (c3.get('blocks') or {}).values()]
+    seen = set()
+    for r in roots:
+        for w in _ui_walk(r):
+            if id(w) in seen:
+                continue
+            seen.add(id(w))
+            try:
+                mgr = w.winfo_manager()
+                if mgr == 'grid':
+                    p0, p1 = _ui_pad2(w.grid_info().get('pady', 0))
+                    n0, n1 = min(p0, 4), min(p1, 1)
+                    if (n0, n1) != (p0, p1):
+                        w.grid_configure(pady=(n0, n1))
+                elif mgr == 'pack':
+                    p0, p1 = _ui_pad2(w.pack_info().get('pady', 0))
+                    n0, n1 = min(p0, 4), min(p1, 2)
+                    if (n0, n1) != (p0, p1):
+                        w.pack_configure(pady=(n0, n1))
+                cls = w.winfo_class()
+                if cls == 'Entry':
+                    if _ui_int(w, 'bd') > 3:
+                        _ui_raw_conf(w, bd=3)
+                elif cls == 'Spinbox':
+                    if _ui_int(w, 'bd') > 2:
+                        _ui_raw_conf(w, bd=2)
+                elif cls == 'Button':
+                    if _ui_int(w, 'pady') > 2:
+                        _ui_raw_conf(w, pady=2)
+                elif cls == 'Radiobutton' and getattr(w, '_ui_skin', None) == 'chip':
+                    _ui_raw_conf(w, pady=1)
+            except Exception:
+                pass
+    try:
+        for name in ('cfg', 'br', 'tor', 'wm'):
+            p = c3['blocks'][name][1]
+            _ui_raw_conf(p, padx=12, pady=8)
+    except Exception:
+        pass
+    # the Human typing row (added later than its neighbours) takes their
+    # exact fonts, so the Browser Settings card reads as one family
+    try:
+        idx = _v20_widget_index(self)
+        ref_t = (idx.get('Variation humaine') or [None])[0]
+        ref_c = None
+        for w in _ui_walk(c3['blocks']['br'][1]):
+            if w.winfo_class() == 'Checkbutton' and str(getattr(w, '_i18n_src', '') or '').startswith('\u00b120'):
+                ref_c = w
+                break
+        for w in idx.get('Frappe humaine', []):
+            if ref_t is not None:
+                w._ui_fbase = getattr(ref_t, '_ui_fbase', None) or _ui_font_parts(ref_t, ref_t.cget('font'))
+                _ui_raw_conf(w, font=ref_t.cget('font'))
+        for w in idx.get('D\u00e9but lent, fautes corrig\u00e9es, liens coll\u00e9s', []):
+            if ref_c is not None:
+                w._ui_fbase = getattr(ref_c, '_ui_fbase', None) or _ui_font_parts(ref_c, ref_c.cget('font'))
+                _ui_raw_conf(w, font=ref_c.cget('font'))
+        self._v20_widx = None
+    except Exception:
+        _v20_dbg()
+
+
+# ------------------------------------------ Configuration: two columns
+def _v20_cfg_parts(self):
+    """The grid rows of the Configuration card that form its right column:
+    ZIP source, CSV source, Max number of posts and Start Posting / Stop."""
+    cache = getattr(self, '_v20_cfgp', None)
+    if cache is not None:
+        return cache
+    p = self._ui_cfg3['blocks']['cfg'][1]
+    zvar = str(getattr(self, '_ui_src_zip_var', '') or '')
+    rows = {}
+    for s in p.grid_slaves():
+        try:
+            rows.setdefault(int(s.grid_info()['row']), []).append(s)
+        except Exception:
+            pass
+
+    def row_where(pred):
+        for r in sorted(rows):
+            for s in rows[r]:
+                for w in _ui_walk(s):
+                    try:
+                        if pred(w):
+                            return r
+                    except Exception:
+                        pass
+        return None
+    z = row_where(lambda w: w.winfo_class() == 'Checkbutton' and zvar and str(w.cget('variable')) == zvar)
+    d = row_where(lambda w: str(getattr(w, '_i18n_src', '') or '').strip().startswith('\U0001f4c2  Glissez'))
+    mx = row_where(lambda w: getattr(w, '_i18n_src', None) == 'Nombre max de posts')
+    st = row_where(lambda w: w.winfo_class() == 'Button' and getattr(w, '_i18n_src', None) == '▶ Lancer la publication')
+    if None in (z, d, mx, st) or not (z < d):
+        self._v20_cfgp = {}
+        return self._v20_cfgp
+    right_rows = sorted(set(range(z, d + 1)) | {mx, mx + 1, st})
+    items = []
+    for r in right_rows:
+        for s in rows.get(r, []):
+            items.append((r, s))
+    self._v20_cfgp = {'panel': p, 'items': items, 'rows': right_rows, 'split': False}
+    return self._v20_cfgp
+
+
+def _v20_cfg_split(self, on, right_w=0, gap=16):
+    parts = _v20_cfg_parts(self)
+    if not parts:
+        return False
+    p = parts['panel']
+    if not on:
+        if parts['split']:
+            for _r, s in parts['items']:
+                try:
+                    s.place_forget()
+                    s.grid()
+                except Exception:
+                    pass
+            p.columnconfigure(2, minsize=0, weight=0)
+            parts['split'] = False
+        return False
+    if not parts['split']:
+        for _r, s in parts['items']:
+            try:
+                s.grid_remove()
+            except Exception:
+                pass
+        parts['split'] = True
+    p.columnconfigure(2, minsize=int(right_w) + gap, weight=0)
+    parts['rw'], parts['gap'] = int(right_w), gap
+    return True
+
+
+def _v20_cfg_place_right(self):
+    """Stack the right-column rows (after the card has its width); returns
+    the height the card needs."""
+    parts = _v20_cfg_parts(self)
+    if not parts or not parts.get('split'):
+        return None
+    p = parts['panel']
+    rw, gap = parts['rw'], parts['gap']
+    try:
+        p.update_idletasks()
+        # the left column may need more than planned (long URL row): give
+        # the difference back so nothing is pushed past the card's edge
+        excess = p.winfo_reqwidth() - p.winfo_width()
+        if excess > 0 and p.winfo_width() > 1:
+            rw = max(200, rw - excess)
+            p.columnconfigure(2, minsize=rw + gap, weight=0)
+            parts['rw'] = rw
+            p.update_idletasks()
+        x0 = p.grid_bbox(2, 0)[0] + gap
+        t = self._ui_cfg3['blocks']['cfg'][0]
+        y = p.grid_bbox(0, 0)[1] + t.winfo_reqheight() + 8
+    except Exception:
+        return None
+    for _r, s in parts['items']:
+        try:
+            if s.winfo_class() == 'Label' and not getattr(s, '_v20_anch', False):
+                _ui_raw_conf(s, anchor='w', justify='left')
+                s._v20_anch = True
+        except Exception:
+            pass
+    for _r, s in parts['items']:
+        try:
+            gi = getattr(s, '_v20_gi', None)
+            if gi is None:
+                s._v20_gi = gi = _ui_pad2(s.grid_info().get('pady', 0)) if s.winfo_manager() == 'grid' \
+                    else (3, 1)
+            p0, p1 = gi
+            s.place(in_=p, x=x0, y=y + p0, width=rw)
+        except Exception:
+            continue
+    # rows wider than the column flow / wrap, exactly like grid rows do
+    try:
+        p.update_idletasks()
+    except Exception:
+        pass
+    for _r, s in parts['items']:
+        try:
+            if s.winfo_reqwidth() > rw + 1:
+                if _ui_is_row(s):
+                    _ui_flow(self, s, rw)
+                elif s.winfo_class() in _UI_WRAPPABLE:
+                    _ui_wrap(self, s, rw)
+            _ui_fit_section(self, s)
+        except Exception:
+            pass
+    try:
+        p.update_idletasks()
+    except Exception:
+        pass
+    for _r, s in parts['items']:
+        try:
+            p0, p1 = s._v20_gi
+            h = s.winfo_reqheight()
+            s.place_configure(y=y + p0, height=h)
+            y += p0 + h + p1
+        except Exception:
+            continue
+    return y + _ui_int(p, 'pady') + 2
+
+
+# ------------------------------------------------------ page layout
+def _v20_acc_min_h(self, rows=4.0):
+    try:
+        card = self.accounts_frame.master
+        h = 0
+        for w in card.pack_slaves():
+            if w is self.accounts_frame:
+                continue
+            p0, p1 = _ui_pad2(w.pack_info().get('pady', 0))
+            h += w.winfo_reqheight() + p0 + p1
+        return h + int(rows * (int(getattr(self, "ROW_H", 30)) + 2)) + 4
+    except Exception:
+        return 300
+
+
+_v20_prev_layout_config = _ui13_layout_config
+
+
+def _ui13_layout_config(self, spec, body_w, body_h):
+    if body_w < _V20_WIDE:
+        _v20_cfg_split(self, False)
+        return _v20_prev_layout_config(self, spec, body_w, body_h)
+    S = self._sections['campagne']
+    H = self._sections['horaires']
+    A = self._sections['comptes']
+    c3 = self._ui_cfg3
+    b = c3['blocks']
+    p_cfg, p_br, p_tor, p_wm = b['cfg'][1], b['br'][1], b['tor'][1], b['wm'][1]
+    m, g = _UI13_M, _UI13_G
+    bw = max(_V20_B_MIN, min(_V20_B_MAX, int((body_w - 2 * m - g) * 0.40)))
+    aw = body_w - 2 * m - g - bw
+    ax, bx = m, m + aw + g
+    S.place(x=0, y=0, width=body_w, height=max(10, body_h))
+    _ui_br_arrange(self, bw >= 400)
+    tor_open = bool((c3.get('tor') or {}).get('open'))
+    wm_open = bool((c3.get('wm') or {}).get('open'))
+    side = (not tor_open) and (not wm_open) and bw >= 520
+    inner = aw - 2 * _ui_int(p_cfg, 'padx') - 2
+    rw = max(250, int((inner - 16) * 0.48))
+    split = _v20_cfg_split(self, True, rw, 16)
+    _ui13_acc_scroll(self, True)
+    p_cfg.place(x=ax, y=m, width=aw, height='')
+    A.place(x=ax, y=m, width=aw, height=300)
+    p_br.place(x=bx, y=m, width=bw, height='')
+    if side:
+        tw = (bw - g) // 2
+        p_tor.place(x=bx, y=m, width=tw, height='')
+        p_wm.place(x=bx + tw + g, y=m, width=bw - tw - g, height='')
+    else:
+        p_tor.place(x=bx, y=m, width=bw, height='')
+        p_wm.place(x=bx, y=m, width=bw, height='')
+    H.place(x=bx, y=m, width=bw, height='')
+    _ui_fit_boxes(self, [p_cfg, p_br, p_tor, p_wm, H, A])
+    cfg_h = p_cfg.winfo_reqheight()
+    if split:
+        need = _v20_cfg_place_right(self)
+        if need:
+            cfg_h = max(cfg_h, need)
+    br_h = p_br.winfo_reqheight()
+    tor_h, wm_h = p_tor.winfo_reqheight(), p_wm.winfo_reqheight()
+    row_h = max(tor_h, wm_h) if side else tor_h + g + wm_h
+    h_req = H.winfo_reqheight()
+    acc_min = max(_v20_acc_min_h(self), 220)
+    total = max(body_h, cfg_h + g + acc_min + 2 * m, br_h + g + row_h + g + h_req + 2 * m)
+    # left column: Configuration on top, accounts fill the rest
+    p_cfg.place(x=ax, y=m, width=aw, height=cfg_h)
+    acc_y = m + cfg_h + g
+    A.place(x=ax, y=acc_y, width=aw, height=total - acc_y - m)
+    # right column: browser settings, [tor | watermark], working hours
+    p_br.place(x=bx, y=m, width=bw, height=br_h)
+    y = m + br_h + g
+    if side:
+        tw = (bw - g) // 2
+        p_tor.place(x=bx, y=y, width=tw, height=row_h)
+        p_wm.place(x=bx + tw + g, y=y, width=bw - tw - g, height=row_h)
+    else:
+        p_tor.place(x=bx, y=y, width=bw, height=tor_h)
+        p_wm.place(x=bx, y=y + tor_h + g, width=bw, height=wm_h)
+    y += row_h + g
+    H.place(x=bx, y=y, width=bw, height=max(h_req, total - y - m))
+    S.place(x=0, y=0, width=body_w, height=max(10, total))
+    for w_ in (H, A):
+        try:
+            _ui13_raise(w_)
+        except Exception:
+            pass
+    for t_, _p in b.values():
+        _ui13_raise(t_)
+    try:
+        _ui13_acc_place(self)
+    except Exception:
+        pass
+    self._ui_two_cols = True
+    return total
+
+
+# ------------------------------------------------ pixel-accurate zoom
+# The zoom used to round every font to whole points (9 pt × 0.9 -> 8 pt,
+# 8 pt -> 7 pt), so 90 % looked uneven.  Fonts are now scaled in pixels,
+# the same way for every size, and the zoom moves along fixed, pleasant
+# steps.  "Compact" (92 %: 11 px body text) is the v20 default density.
+_V20_ZOOM_STEPS = (0.8, 0.86, 0.92, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5)
+_V20_ZOOM_DEFAULT = 0.92
+_V20_PX_PER_PT = [None]
+
+
+def _v20_px_per_pt():
+    v = _V20_PX_PER_PT[0]
+    if v is None:
+        try:
+            import tkinter as _tk
+            v = float(_tk._default_root.tk.call('tk', 'scaling'))
+        except Exception:
+            v = 96.0 / 72.0
+        _V20_PX_PER_PT[0] = v
+    return v
+
+
+def _ui_scaled(parts, z):
+    s = parts[1]
+    if not s:
+        return tuple(parts)
+    if abs(z - 1.0) < 1e-6:
+        return tuple(parts)
+    px = abs(s) * _v20_px_per_pt() if s > 0 else abs(s)
+    n = max(8, int(round(px * z)))
+    return tuple([parts[0], -n] + list(parts[2:]))
+
+
+def _v20_zoom_step(self, d):
+    z = _UI_ZOOM[0]
+    steps = _V20_ZOOM_STEPS
+    if d > 0:
+        nxt = [s for s in steps if s > z + 1e-6]
+        z2 = nxt[0] if nxt else steps[-1]
+    else:
+        prv = [s for s in steps if s < z - 1e-6]
+        z2 = prv[-1] if prv else steps[0]
+    self._ui_set_zoom(z2)
+
+
+FacebookMultiPosterApp._ui_zoom_step = _v20_zoom_step
+_UI_ZOOM_MIN = _V20_ZOOM_STEPS[0]
+_UI_ZOOM_MAX = _V20_ZOOM_STEPS[-1]
+
+
+def _v20_default_density(self):
+    """Once, on the first start of v20: the Compact density - unless the
+    user had already chosen a zoom of their own."""
+    try:
+        flag = os.path.join(SESSION_BASE, 'ui20_density.flag')
+        if os.path.exists(flag):
+            return
+        if abs(_UI_ZOOM[0] - 1.0) < 1e-6:
+            self._ui_set_zoom(_V20_ZOOM_DEFAULT)
+        os.makedirs(SESSION_BASE, exist_ok=True)
+        with open(flag, 'w') as fh:
+            fh.write('1')
+    except Exception:
+        _v20_dbg()
+
+
+# ------------------------------------------------ account table columns
+# The fixed column widths of the account rows follow the density, so the
+# whole row (down to Connect / Disconnect) stays visible in the compact
+# window.  Same columns, same order, same proxy-column rule as before.
+FacebookMultiPosterApp.ROW_MINW = 560
+
+
+def _v20_row_zones(self, W, *a, **kw):
+    k = min(1.0, float(_UI_ZOOM[0] or 1.0))
+    W2 = max(int(W), int(self.ROW_MINW))
+    z = {}
+    x = W2 - 6
+    for name, w in (('act2', 90), ('act1', 58), ('page', 96), ('post', 56), ('stat', 92)):
+        w = int(round(w * k))
+        z[name] = (x - w, x)
+        x -= w + 1
+    z['cb'] = (10, 34)
+    z['num'] = (38, 64)
+    n1, n2 = 70, max(150, x - 10)
+    avail = n2 - n1
+    pw = min(150, avail - 84)
+    if pw >= 110:
+        z['proxy'] = (n2 - pw, n2)
+    elif avail - 60 >= 56:
+        pw = 56
+        z['proxy'] = (n2 - pw, n2)
+    else:
+        z['name'] = (n1, n2)
+        return (W2, z)
+    z['name'] = (n1, n2 - pw - 6)
+    return (W2, z)
+
+
+FacebookMultiPosterApp._row_zones = _v20_row_zones
+
+# <<< V20-END
 
 if __name__ == '__main__':
     main()

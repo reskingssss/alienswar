@@ -11,6 +11,8 @@ declare(strict_types=1);
 require_once __DIR__ . '/activation_limit.php';
 require_once __DIR__ . '/channels.php';
 require_once __DIR__ . '/license.php';
+// v8: per-option gating and Control ZIP Links ride the same signed check-in.
+require_once __DIR__ . '/tool_control.php';
 
 function checkin_evaluate(string $device, string $legacy, string $version, int $profiles,
                           string $token, array $in): array
@@ -78,6 +80,12 @@ function checkin_evaluate(string $device, string $legacy, string $version, int $
         'update' => $update,
         'scripts' => array_map(static fn($s) => [$s['slug'], $s['version'], $s['sha256']], $scripts),
         'next' => $interval,
+        // v8: every option of the tool, per plan (id => [free, pro, team]),
+        // and the Control ZIP Links rules. Signed with the rest of the
+        // control block, so neither can be forged or edited in transit.
+        'gates' => tool_gates_compact(),
+        'ziplinks' => ziplinks_for_client(),
+        'tcv' => tool_control_version(),
     ], max(3600, (int)GRACE_DAYS * 86400));
 
     return array_merge(update_block_fields($version), [

@@ -716,6 +716,14 @@ class LicenseClient:
         # v7.0.1: last remote-tab refresh error is diagnostic only. It never
         # changes entitlement, cached tabs, or any existing feature.
         self.tabs_last_error = str(st.get("tabs_last_error", "") or "")
+        # v8.0.0: per-option gating (id -> [free, pro, team]) and the Control
+        # ZIP Links rules. Both arrive ONLY inside the signed control block;
+        # cached so they keep applying offline. Nothing received yet = every
+        # option allowed (the behaviour before v8) and the built-in ZIP link
+        # defaults, which match the server's own defaults.
+        self.gates = st.get("gates", {}) or {}
+        self.ziplinks = st.get("ziplinks", {}) or {}
+        self.tool_control_version = str(st.get("tcv", "") or "")
         self.legacy_device = st.get("legacy_device", "")
         self.legacy_imported = bool(st.get("legacy_imported", False))
         if self.legacy_imported:
@@ -751,6 +759,10 @@ class LicenseClient:
             "tabs": self.tabs,
             "tab_blobs": self.tab_blobs,
             "tabs_last_error": getattr(self, "tabs_last_error", ""),
+            # v8.0.0 (additive)
+            "gates": getattr(self, "gates", {}),
+            "ziplinks": getattr(self, "ziplinks", {}),
+            "tcv": getattr(self, "tool_control_version", ""),
         })
 
     # ---- state the GUI asks about ------------------------------------
@@ -902,6 +914,13 @@ class LicenseClient:
                 self.release_notes = str(upd.get("notes", "") or "")
                 plan = str(control.get("plan", "free") or "free")
                 lic_state = str(control.get("license_state", "none") or "none")
+                # v8.0.0: remote per-option gating + Control ZIP Links. Taken
+                # from the SIGNED block only; an unsigned reply never changes them.
+                if isinstance(control.get("gates"), dict):
+                    self.gates = self._clean_gates(control.get("gates"))
+                if isinstance(control.get("ziplinks"), dict):
+                    self.ziplinks = control.get("ziplinks")
+                self.tool_control_version = str(control.get("tcv", "") or "")
             else:
                 # unsigned or mismatched control: fall back to the plain fields,
                 # but they may only make things STRICTER. They can never turn a
@@ -982,6 +1001,93 @@ class LicenseClient:
         except (TypeError, ValueError):
             return CHECKIN_SECONDS_DEFAULT
         return max(CHECKIN_SECONDS_MIN, min(CHECKIN_SECONDS_MAX, v))
+
+    # ---- v8.0.0: remote per-option gating ----------------------------
+    _TIER_INDEX = {"free": 0, "pro": 1, "team": 2}
+
+    @staticmethod
+    def _clean_gates(raw) -> dict:
+        out = {}
+        for key, row in (raw or {}).items():
+            try:
+                vals = [bool(int(v)) for v in list(row)[:3]]
+            except Exception:
+                continue
+            if len(vals) == 3:
+                out[str(key)[:64]] = vals
+        return out
+
+    def feature_allowed(self, option_id: str, plan: str = None) -> bool:
+        """True when the dashboard allows this option on this plan (the
+        current plan by default). Unknown ids are allowed, so an option the
+        server does not know about yet keeps working exactly as before."""
+        row = (getattr(self, "gates", {}) or {}).get(option_id)
+        if not row:
+            return True
+        idx = self._TIER_INDEX.get(plan or self.current_plan(), 0)
+        try:
+            return bool(row[idx])
+        except Exception:
+            return True
+
+    def feature_min_plan(self, option_id: str) -> str:
+        """The lowest plan that may use this option: 'free', 'pro', 'team',
+        or '' when the dashboard has switched it off for every plan."""
+        row = (getattr(self, "gates", {}) or {}).get(option_id)
+        if not row:
+            return "free"
+        for name in ("free", "pro", "team"):
+            try:
+                if row[self._TIER_INDEX[name]]:
+                    return name
+            except Exception:
+                return "free"
+        return ""
+
+    # ---- v8.0.0: Control ZIP Links -------------------------------------
+    ZIPLINKS_DEFAULT_DOMAINS = ["usadealshub.shop", "mavelylink.com",
+                                "martdeals.shop", "usathedeals.shop"]
+
+    def ziplinks_rules(self, plan: str = None) -> dict:
+        """The ZIP link rules for this plan (current plan by default):
+        {'enforce', 'domains', 'check_description', 'apply_to_csv',
+         'message', 'url', 'label', 'plan'}. 'enforce' False means every
+        link is supported. Built-in defaults (same as the server's) apply
+        until a signed check-in has delivered the dashboard's settings."""
+        plan = plan or self.current_plan()
+        cfg = getattr(self, "ziplinks", {}) or {}
+        default_dom = list(self.ZIPLINKS_DEFAULT_DOMAINS)
+        if not cfg:
+            cfg = {"on": 1, "tiers": {"free": {"e": 1, "d": default_dom},
+                                       "pro": {"e": 0, "d": default_dom},
+                                       "team": {"e": 0, "d": default_dom}},
+                   "desc": 0, "csv": 0,
+                   "msg": "Your link is not supported in the {plan} version.",
+                   "url": "https://mavelylink.com/", "label": "Get supported links"}
+        tiers = cfg.get("tiers") if isinstance(cfg.get("tiers"), dict) else {}
+        row = tiers.get(plan) if isinstance(tiers.get(plan), dict) else {}
+        domains = []
+        for d in row.get("d", []) or []:
+            d = str(d or "").strip().lower()
+            if d:
+                domains.append(d)
+        try:
+            enforce = bool(int(cfg.get("on", 1))) and bool(int(row.get("e", 0)))
+        except Exception:
+            enforce = False
+        url = str(cfg.get("url") or "")
+        if not url.lower().startswith("https://"):
+            url = "https://mavelylink.com/"
+        return {
+            "plan": plan,
+            "enforce": enforce,
+            "domains": domains,
+            "check_description": bool(cfg.get("desc", 0)),
+            "apply_to_csv": bool(cfg.get("csv", 0)),
+            "message": str(cfg.get("msg") or "Your link is not supported in the {plan} version."),
+            "url": url,
+            "label": str(cfg.get("label") or "Get supported links"),
+        }
 
     # ---- activation --------------------------------------------------
     def activate(self, serial: str) -> tuple:
