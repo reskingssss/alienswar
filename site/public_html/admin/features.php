@@ -48,6 +48,7 @@ foreach ($matrix as $row) {
     }
 }
 $tierNames = ['free' => 'Free', 'pro' => 'Pro', 'team' => 'Unlimited for team'];
+$tierShort = ['free' => 'Free', 'pro' => 'Pro', 'team' => 'Unlimited'];   // the switch labels; full name in the tooltip
 $updated = setting('tool_control_updated_at');
 
 layout_top('Tool options by plan', 'Allow or block every option of the tool for Free, Pro and Unlimited for team.');
@@ -93,10 +94,11 @@ layout_top('Tool options by plan', 'Allow or block every option of the tool for 
         </div>
         <div class="tm-switches">
           <?php foreach (TOOL_TIERS as $t): $fid = 'g-' . preg_replace('/[^a-z0-9]/', '-', $id) . '-' . $t; ?>
-          <label class="tm-switch tm-<?= $t ?>" for="<?= e($fid) ?>">
-            <input type="checkbox" id="<?= e($fid) ?>" name="gate[<?= e($id) ?>][<?= $t ?>]" value="1"<?= $row[$t] ? ' checked' : '' ?>>
+          <label class="tm-switch tm-<?= $t ?>" for="<?= e($fid) ?>" title="<?= e($label . ' · ' . $tierNames[$t]) ?>">
+            <input type="checkbox" id="<?= e($fid) ?>" name="gate[<?= e($id) ?>][<?= $t ?>]" value="1"<?= $row[$t] ? ' checked' : '' ?>
+                   aria-label="<?= e($label . ' — ' . $tierNames[$t]) ?>">
             <span class="tm-track" aria-hidden="true"><span class="tm-knob"></span></span>
-            <span class="tm-tier"><?= e($tierNames[$t]) ?></span>
+            <span class="tm-tier" aria-hidden="true"><?= e($tierShort[$t]) ?></span>
           </label>
           <?php endforeach; ?>
         </div>

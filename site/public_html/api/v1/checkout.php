@@ -3,7 +3,8 @@
  * POST /api/v1/checkout.php {plan, email, name, coupon, method}
  * Header: X-CSRF-Token (from the checkout page session)
  * Creates the order with a server-calculated total. For PayPal it also
- * creates the PayPal order and returns its id to the PayPal buttons.
+ * creates the PayPal order and returns its id to the PayPal buttons; for a
+ * card (v8) it creates the Stripe Checkout page and returns its address.
  */
 declare(strict_types=1);
 require_once __DIR__ . '/../../includes/orders.php';
@@ -27,7 +28,8 @@ if (!isset($methods[$method])) {
     json_out(['ok' => false, 'error' => 'That payment method is not available.'], 400);
 }
 $made = order_create((string)($in['plan'] ?? ''), (string)($in['email'] ?? ''), (string)($in['name'] ?? ''),
-    (string)($in['coupon'] ?? ''), $method === 'paypal' ? 'paypal' : ($method === 'crypto' ? 'crypto' : 'manual'));
+    (string)($in['coupon'] ?? ''), $method === 'paypal' ? 'paypal'
+        : ($method === 'crypto' ? 'crypto' : ($method === 'card' ? 'stripe' : 'manual')));
 if (!$made['ok']) {
     json_out(['ok' => false, 'field' => $made['field'] ?? null, 'error' => $made['error']], 422);
 }
@@ -51,6 +53,15 @@ if ($method === 'paypal') {
         json_out(['ok' => false, 'error' => $pp['error'], 'redirect' => $urls['failed']], 502);
     }
     json_out(['ok' => true, 'ref' => $order['ref'], 't' => $order['access_token'], 'paypal_order_id' => $pp['id']]);
+}
+if ($method === 'card') {
+    // v8: VISA / Mastercard on Stripe's hosted card page
+    $cs = stripe_create_session($order);
+    if (!$cs['ok']) {
+        order_update((int)$order['id'], ['status' => 'failed', 'failure_reason' => 'Card payment page could not be created']);
+        json_out(['ok' => false, 'error' => $cs['error'], 'redirect' => $urls['failed']], 502);
+    }
+    json_out(['ok' => true, 'ref' => $order['ref'], 'redirect' => $cs['url']]);
 }
 if ($method === 'crypto') {
     $inv = crypto_create_invoice($order);

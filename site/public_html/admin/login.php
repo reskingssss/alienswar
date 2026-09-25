@@ -22,7 +22,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>Admin sign in · <?= e(SITE_NAME) ?></title><link rel="stylesheet" href="../assets/css/admin.css?v=7">
+<title>Admin sign in · <?= e(SITE_NAME) ?></title><meta name="color-scheme" content="light dark"><link rel="stylesheet" href="../assets/css/admin.css?v=8"><script src="../assets/js/theme.js?v=8"></script>
 </head><body class="login-page">
 <form method="post" class="card login" novalidate>
   <div class="side-brand login-brand"><span class="brand-mark" aria-hidden="true"></span><?= e(SITE_NAME) ?> <span>Admin</span></div>

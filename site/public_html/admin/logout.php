@@ -13,7 +13,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 }
 ?><!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
-<title>Log out</title><link rel="stylesheet" href="../assets/css/admin.css?v=7"></head>
+<title>Log out</title><link rel="stylesheet" href="../assets/css/admin.css?v=8"></head>
 <body class="login-page"><form method="post" class="card login">
 <h1>Log out?</h1><?= csrf_field() ?>
 <button class="btn btn-primary" type="submit">Log out</button>

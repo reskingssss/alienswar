@@ -150,7 +150,11 @@
   var master = document.getElementById('zl-enabled');
   var body = document.getElementById('zl-body');
   if (master && body) {
-    var m = function () { body.classList.toggle('is-off', !master.checked); };
+    var card = master.closest('.switch-card');
+    var m = function () {
+      body.classList.toggle('is-off', !master.checked);
+      if (card) { card.classList.toggle('is-on', master.checked); card.classList.toggle('is-off', !master.checked); }
+    };
     master.addEventListener('change', m);
     m();
   }

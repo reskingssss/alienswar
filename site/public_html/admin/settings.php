@@ -15,9 +15,10 @@ require_admin();
  * keeps their older keys working but points to those pages for them.
  */
 $textKeys = ['paypal_client_id', 'paypal_secret', 'paypal_webhook_id',
+             'stripe_publishable_key', 'stripe_secret_key', 'stripe_webhook_secret',
              'crypto_provider', 'crypto_api_key', 'crypto_ipn_secret', 'crypto_merchant_id',
              'usdt_network', 'usdt_address'];
-$boolKeys = ['paypal_enabled', 'paypal_live', 'crypto_enabled'];
+$boolKeys = ['paypal_enabled', 'paypal_live', 'crypto_enabled', 'stripe_enabled', 'paypal_cards'];
 
 if (admin_post()) {
     if (isset($_POST['save_payments'])) {
@@ -33,7 +34,12 @@ if (admin_post()) {
         if (setting_bool('crypto_enabled') && setting('crypto_provider') === 'manual' && $addr === '') {
             audit('settings.payments', 'crypto enabled without an address');
         }
-        audit('settings.payments', 'paypal=' . setting('paypal_enabled') . ' crypto=' . setting('crypto_enabled'));
+        $sk = (string)setting('stripe_secret_key', '');
+        if (setting_bool('stripe_enabled') && !stripe_ready()) {
+            back_to('settings.php', 'Card payments stay off: the Stripe secret key must start with sk_live_ or sk_test_ (or rk_).', false);
+        }
+        audit('settings.payments', 'paypal=' . setting('paypal_enabled') . ' crypto=' . setting('crypto_enabled')
+            . ' card=' . setting('stripe_enabled') . ($sk !== '' ? (str_contains($sk, '_live_') ? ' (live)' : ' (test)') : ''));
         back_to('settings.php', 'Payment settings saved.');
     }
     if (isset($_POST['save_general'])) {
@@ -193,6 +199,8 @@ function db_write_local_config(array $creds): array
 
 $methods = checkout_methods();
 $webhookPaypal = site_url('api/webhooks/paypal.php');
+$webhookStripe = site_url('api/webhooks/stripe.php');
+$stripeKey = (string)setting('stripe_secret_key', '');
 $webhookCrypto = site_url('api/webhooks/crypto.php');
 layout_top('Settings', 'Payment providers and general options.');
 ?>
@@ -200,7 +208,7 @@ layout_top('Settings', 'Payment providers and general options.');
   <div class="card-head"><h2 id="live">Checkout right now</h2></div>
   <?php if (!$methods): ?>
     <div class="alert alert-warn" role="status">No payment method is active, so the checkout page is closed. Turn on
-      PayPal or crypto below, or enable a contact channel under <a href="channels.php">Contact channels</a>.</div>
+      card payments, PayPal or crypto below, or enable a contact channel under <a href="channels.php">Contact channels</a>.</div>
   <?php else: ?>
     <p>Customers can pay with: <?php foreach ($methods as $m) {
         echo '<span class="chip chip-good"><span aria-hidden="true">●</span> ' . e($m['label']) . '</span> ';
@@ -212,12 +220,36 @@ layout_top('Settings', 'Payment providers and general options.');
 
 <form method="post">
   <?= csrf_field() ?>
+  <section class="card" id="card" aria-labelledby="cardh">
+    <div class="card-head"><h2 id="cardh">VISA / Mastercard (Stripe)</h2>
+      <?= stripe_ready() ? state_chip('on', str_contains($stripeKey, '_live_') ? 'On · live' : 'On · test mode') : state_chip('off', 'Off') ?></div>
+    <p class="muted small">Buyers pay by card on Stripe's secure hosted page; card numbers never reach this site. A licence
+      is issued only after the server reads the payment back from Stripe (webhook, or the buyer's status page), for the
+      exact order total. Refunds and chargebacks revoke what the payment bought.</p>
+    <label class="check"><input type="checkbox" name="stripe_enabled"<?= setting_bool('stripe_enabled') ? ' checked' : '' ?>> Offer card payment (VISA, Mastercard) at checkout</label>
+    <div class="form-grid">
+      <label class="field">Secret key <span class="hint">sk_live_… or sk_test_… (a restricted key rk_… works too)</span>
+        <input type="password" name="stripe_secret_key" value="<?= e($stripeKey) ?>" autocomplete="new-password" spellcheck="false"></label>
+      <label class="field">Publishable key <span class="hint">optional, pk_…</span>
+        <input name="stripe_publishable_key" value="<?= e(setting('stripe_publishable_key', '')) ?>" autocomplete="off" spellcheck="false"></label>
+      <label class="field">Webhook signing secret <span class="hint">whsec_…</span>
+        <input type="password" name="stripe_webhook_secret" value="<?= e(setting('stripe_webhook_secret', '')) ?>" autocomplete="new-password" spellcheck="false"></label>
+    </div>
+    <p class="muted small">Webhook URL to add in Stripe → Developers → Webhooks: <code><?= e($webhookStripe) ?></code>
+      <button type="button" class="copy" data-copy="<?= e($webhookStripe) ?>" aria-label="Copy webhook URL" title="Copy"><?= icon('copy') ?></button><br>
+      Events: <code>checkout.session.completed</code>, <code>checkout.session.async_payment_succeeded</code>,
+      <code>checkout.session.async_payment_failed</code>, <code>checkout.session.expired</code>,
+      <code>charge.refunded</code>, <code>charge.dispute.created</code>.</p>
+  </section>
+
   <section class="card" aria-labelledby="pp">
     <div class="card-head"><h2 id="pp">PayPal</h2><?= setting_bool('paypal_enabled') ? state_chip('on', 'On') : state_chip('off', 'Off') ?></div>
     <p class="muted small">Orders are created and captured on the server and verified by webhook, so the amount charged
       always matches the order. Buyers are sent to PayPal; card details never reach this site.</p>
     <label class="check"><input type="checkbox" name="paypal_enabled"<?= setting_bool('paypal_enabled') ? ' checked' : '' ?>> Offer PayPal at checkout</label>
     <label class="check"><input type="checkbox" name="paypal_live"<?= setting_bool('paypal_live') ? ' checked' : '' ?>> Live mode <span class="muted small">&nbsp;(unticked = sandbox for testing)</span></label>
+    <label class="check"><input type="checkbox" name="paypal_cards"<?= setting_bool('paypal_cards', true) ? ' checked' : '' ?>> <span>Show PayPal's
+      <b>Debit or Credit Card</b> button (VISA / Mastercard without a PayPal account)</span></label>
     <div class="form-grid">
       <label class="field">Client ID<input name="paypal_client_id" value="<?= e(setting('paypal_client_id', '')) ?>" autocomplete="off"></label>
       <label class="field">Secret<input type="password" name="paypal_secret" value="<?= e(setting('paypal_secret', '')) ?>" autocomplete="new-password"></label>

@@ -25,7 +25,8 @@ $q = price_quote($planCode, '', '');
 $currency = (string)$plan['currency'];
 $paypalClientId = paypal_ready() ? (string)setting('paypal_client_id', '') : '';
 $paypalLive = setting_bool('paypal_live');
-$hasAutomatic = isset($methods['paypal']) || isset($methods['crypto']);
+$paypalCards = setting_bool('paypal_cards', true);
+$hasAutomatic = isset($methods['paypal']) || isset($methods['crypto']) || isset($methods['card']);
 $manualChannels = channels_enabled();
 
 page_top('Checkout · ' . $plan['name'] . ' — ' . SITE_NAME,
@@ -78,7 +79,8 @@ page_top('Checkout · ' . $plan['name'] . ' — ' . SITE_NAME,
               <input type="radio" name="method" value="<?= e($key) ?>"<?= $first ? ' checked' : '' ?>
                      data-kind="<?= e($m['kind']) ?>"<?= isset($m['channel']) ? ' data-channel="' . e($m['channel']['code']) . '"' : '' ?>>
               <span>
-                <span class="m-name"><?= e($m['label']) ?></span>
+                <span class="m-name"><?= e($m['label']) ?><?php if (!empty($m['cards'])): ?>
+                  <span class="cardmarks" aria-label="VISA and Mastercard accepted"><?= card_marks() ?></span><?php endif; ?></span>
                 <?php if (!empty($m['hint'])): ?><span class="m-hint"><?= e($m['hint']) ?></span><?php endif; ?>
               </span>
             </label>
@@ -190,6 +192,7 @@ page_top('Checkout · ' . $plan['name'] . ' — ' . SITE_NAME,
 
   // ---- method switching: PayPal shows its buttons; others use Continue -
   var PAYPAL_ID = <?= json_encode($paypalClientId) ?>;
+  var PAYPAL_CARDS = <?= $paypalCards && !isset($methods['card']) ? 'true' : 'false' ?>;
   var paypalLoaded = false, paypalRendered = false;
 
   function showFor(method) {
@@ -200,7 +203,8 @@ page_top('Checkout · ' . $plan['name'] . ' — ' . SITE_NAME,
       loadPaypal();
     } else {
       contBtn.style.display = ''; ppBox.hidden = true;
-      contBtn.textContent = method.kind === 'manual' ? 'Continue to payment instructions' : 'Continue to payment';
+      contBtn.textContent = method.kind === 'manual' ? 'Continue to payment instructions'
+        : (method.value === 'card' ? 'Pay by card' : 'Continue to payment');
     }
   }
   form.querySelectorAll('input[name=method]').forEach(function (r) {
@@ -212,7 +216,8 @@ page_top('Checkout · ' . $plan['name'] . ' — ' . SITE_NAME,
     if (paypalLoaded) { renderPaypal(); return; }
     var s = document.createElement('script');
     s.src = 'https://www.paypal.com/sdk/js?client-id=' + encodeURIComponent(PAYPAL_ID)
-          + '&currency=' + encodeURIComponent(CURRENCY) + '&intent=capture&components=buttons';
+          + '&currency=' + encodeURIComponent(CURRENCY) + '&intent=capture&components=buttons'
+          + (PAYPAL_CARDS ? '&enable-funding=card' : '&disable-funding=card');
     s.onload = function () { paypalLoaded = true; renderPaypal(); };
     s.onerror = function () { formErr.style.display = 'block'; formErr.textContent = 'PayPal could not load. Check your connection or pick another method.'; };
     document.head.appendChild(s);

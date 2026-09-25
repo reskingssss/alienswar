@@ -4,7 +4,8 @@ require_once __DIR__ . '/helpers.php';
 require_once __DIR__ . '/orders.php';
 
 /**
- * Public site shell (v7). page_top() / page_bottom() keep their original
+ * Public site shell (v8, "Indigo" - the design of AutoPoster Pro 4.0, light and
+ * dark). page_top() / page_bottom() keep their original
  * names and first three arguments; $opts is optional:
  *   'noindex' => true      keep a page out of search engines (checkout, orders)
  *   'body'    => 'class'   extra class on <body>
@@ -44,8 +45,11 @@ function page_top(string $title, string $description, string $path = '/', array 
 <meta property="og:title" content="<?= e($title) ?>">
 <meta property="og:description" content="<?= e($description) ?>">
 <meta property="og:url" content="<?= e($canonical) ?>">
-<meta name="theme-color" content="#0f1b33">
-<link rel="stylesheet" href="/assets/css/site.css?v=7">
+<meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="/assets/css/site.css?v=8">
+<script src="/assets/js/theme.js?v=8"></script>
 <script type="application/ld+json">
 <?= json_encode([
   '@context' => 'https://schema.org',
@@ -68,10 +72,29 @@ function page_top(string $title, string $description, string $path = '/', array 
         <a href="<?= $href ?>"<?= $here === $href ? ' aria-current="page"' : '' ?>><?= e($label) ?></a>
       <?php endforeach; ?>
       <a class="btn btn-primary btn-sm" href="/pricing.php">Get Pro</a>
+      <button type="button" class="theme-toggle" data-theme-toggle aria-pressed="false" aria-label="Dark mode">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
     </nav>
   </div>
 </header>
 <main id="main" tabindex="-1"><?php
+}
+
+/**
+ * Accepted-card marks (VISA, Mastercard) for the checkout and the footer.
+ * Plain inline SVG: no request to a third party, sized by CSS.
+ */
+function card_marks(): string
+{
+    $visa = '<svg viewBox="0 0 48 30" role="img" aria-label="VISA"><rect width="48" height="30" rx="4" fill="#1a1f71"/>'
+        . '<text x="24" y="20" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="12.5" font-weight="800"'
+        . ' font-style="italic" fill="#ffffff" letter-spacing=".5">VISA</text></svg>';
+    $mc = '<svg viewBox="0 0 48 30" role="img" aria-label="Mastercard"><rect width="48" height="30" rx="4" fill="#111827"/>'
+        . '<circle cx="19.5" cy="15" r="8" fill="#eb001b"/><circle cx="28.5" cy="15" r="8" fill="#f79e1b"/>'
+        . '<path d="M24 8.4a8 8 0 0 1 0 13.2 8 8 0 0 1 0-13.2z" fill="#ff5f00"/></svg>';
+    return $visa . $mc;
 }
 
 /** Small generic glyphs for contact channels (text label always shown). */
@@ -96,7 +119,9 @@ function page_bottom(): void
   <div class="wrap foot-grid">
     <div class="foot-brand">
       <a class="logo" href="/"><span class="logo-mark" aria-hidden="true"></span><?= e(SITE_NAME) ?></a>
-      <p class="muted">Isolated Chrome profiles with per-profile fingerprints and managed scripts, for Windows 10 and 11.</p>
+      <p class="muted">AutoPoster Pro for Windows 10 and 11 — Method 1 posts to your Facebook groups on autopilot,
+        Method 2 builds isolated Chrome profiles with their own fingerprints.</p>
+      <?php if (checkout_card_enabled()): ?><div class="paymarks" aria-label="Cards accepted"><?= card_marks() ?></div><?php endif; ?>
     </div>
     <div><h2 class="foot-h">Product</h2>
       <a href="/pricing.php">Plans and pricing</a><a href="/docs.php">Setup guide</a><a href="/faq.php">FAQ</a></div>

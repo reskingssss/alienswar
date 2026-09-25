@@ -507,13 +507,211 @@ function crypto_create_invoice(array $o): array
     return ['ok' => true, 'url' => $url];
 }
 
+// ---------------------------------------------------------------------
+// v8: VISA / Mastercard through Stripe Checkout (hosted card page)
+// ---------------------------------------------------------------------
+// The card form is Stripe's own page: card numbers never touch this site,
+// so the site stays outside PCI scope (SAQ A). An order is fulfilled only
+// after the server has read the Checkout Session back from Stripe with the
+// secret key and seen payment_status = paid for the exact order total, either
+// from the signed webhook or when the buyer's status page polls.
+
+/** Currencies Stripe counts in whole units (no cents). */
+const STRIPE_ZERO_DECIMAL = ['BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX',
+                             'VND', 'VUV', 'XAF', 'XOF', 'XPF'];
+
+function stripe_ready(): bool
+{
+    $key = (string)setting('stripe_secret_key', '');
+    return setting_bool('stripe_enabled') && preg_match('/^(sk|rk)_(live|test)_[A-Za-z0-9]{8,}$/', $key) === 1;
+}
+
+/** True when this checkout can take a VISA / Mastercard payment in any way. */
+function checkout_card_enabled(): bool
+{
+    return stripe_ready() || paypal_ready();
+}
+
+function stripe_minor(float $amount, string $currency): int
+{
+    return in_array(strtoupper($currency), STRIPE_ZERO_DECIMAL, true) ? (int)round($amount) : (int)round($amount * 100);
+}
+
+function stripe_major(int $minor, string $currency): float
+{
+    return in_array(strtoupper($currency), STRIPE_ZERO_DECIMAL, true) ? (float)$minor : $minor / 100;
+}
+
+/** One call to the Stripe API (form-encoded, secret key as Basic auth). */
+function stripe_request(string $method, string $path, array $params = [], string $idempotencyKey = ''): array
+{
+    $key = (string)setting('stripe_secret_key', '');
+    if ($key === '') {
+        return ['status' => 0, 'body' => [], 'error' => 'Stripe is not configured.'];
+    }
+    $base = rtrim((string)cfg('STRIPE_API_BASE_OVERRIDE', ''), '/') ?: 'https://api.stripe.com';
+    $url = $base . $path;
+    $query = http_build_query($params, '', '&', PHP_QUERY_RFC1738);
+    if ($method === 'GET' && $query !== '') {
+        $url .= '?' . $query;
+    }
+    $headers = ['Stripe-Version: 2024-06-20'];
+    if ($idempotencyKey !== '') {
+        $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
+    }
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CUSTOMREQUEST  => $method,
+        CURLOPT_USERPWD        => $key . ':',
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+    ]);
+    if ($method !== 'GET') {
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $query);
+    }
+    $res = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $err = curl_error($ch);
+    curl_close($ch);
+    return ['status' => $status, 'body' => json_decode((string)$res, true) ?: [], 'error' => $err];
+}
+
+/** Create the hosted card page for an order. Returns ['ok', 'url'] or ['ok' => false, 'error']. */
+function stripe_create_session(array $o): array
+{
+    $urls = order_urls($o);
+    $currency = strtoupper((string)$o['currency']);
+    $params = [
+        'mode' => 'payment',
+        'payment_method_types' => ['card'],
+        'client_reference_id' => $o['ref'],
+        'customer_email' => $o['email'],
+        'line_items' => [[
+            'quantity' => 1,
+            'price_data' => [
+                'currency' => strtolower($currency),
+                'unit_amount' => stripe_minor((float)$o['final_amount'], $currency),
+                'product_data' => ['name' => mb_substr(SITE_NAME . ' ' . plan_name((string)$o['plan_code'])
+                                   . ' - ' . (int)$o['period_days'] . ' days', 0, 120)],
+            ],
+        ]],
+        'metadata' => ['order_ref' => $o['ref']],
+        'payment_intent_data' => ['metadata' => ['order_ref' => $o['ref']],
+                                  'description' => 'Order ' . $o['ref']],
+        'success_url' => $urls['status'] . '&paid=card',
+        'cancel_url' => $urls['cancel'],
+        'expires_at' => time() + 3600,
+    ];
+    $r = stripe_request('POST', '/v1/checkout/sessions', $params, 'cs-' . $o['ref']);
+    $id = (string)($r['body']['id'] ?? '');
+    $url = (string)($r['body']['url'] ?? '');
+    if ($r['status'] < 200 || $r['status'] >= 300 || $id === '' || !is_web_url($url)) {
+        audit('stripe.create_failed', $o['ref'] . ' HTTP ' . $r['status'] . ' '
+            . mb_substr((string)($r['body']['error']['code'] ?? $r['error']), 0, 80));
+        return ['ok' => false, 'error' => 'Card payment is not available right now. Try again or choose another method.'];
+    }
+    order_update((int)$o['id'], ['provider' => 'stripe', 'provider_order_id' => $id]);
+    return ['ok' => true, 'url' => $url, 'id' => $id];
+}
+
+/**
+ * Read an order's Checkout Session back from Stripe and act on it: paid ->
+ * licence, expired -> failed. Used by the webhook and by the status page
+ * (a missed webhook never leaves a buyer waiting). Idempotent.
+ */
+function stripe_sync_order(array $o, ?array $session = null): array
+{
+    if ($o['license_id']) {
+        return ['ok' => true, 'status' => 'paid'];
+    }
+    $sid = (string)$o['provider_order_id'];
+    if ($session === null) {
+        if ($sid === '' || strncmp($sid, 'cs_', 3) !== 0) {
+            return ['ok' => false, 'status' => (string)$o['status']];
+        }
+        $r = stripe_request('GET', '/v1/checkout/sessions/' . rawurlencode($sid));
+        if ($r['status'] !== 200) {
+            return ['ok' => false, 'status' => (string)$o['status'], 'error' => 'Stripe HTTP ' . $r['status']];
+        }
+        $session = $r['body'];
+    }
+    if ((string)($session['id'] ?? '') !== $sid || (string)($session['client_reference_id'] ?? '') !== (string)$o['ref']) {
+        audit('stripe.mismatch', $o['ref'] . ' session ' . mb_substr((string)($session['id'] ?? ''), 0, 80));
+        return ['ok' => false, 'status' => 'failed', 'error' => 'Payment reference mismatch.'];
+    }
+    $pay = (string)($session['payment_status'] ?? '');
+    $state = (string)($session['status'] ?? '');
+    if ($pay === 'paid' || $pay === 'no_payment_required') {
+        $currency = strtoupper((string)($session['currency'] ?? ''));
+        $amount = stripe_major((int)($session['amount_total'] ?? 0), $currency);
+        $pi = (string)(is_array($session['payment_intent'] ?? null) ? ($session['payment_intent']['id'] ?? '')
+                                                                     : ($session['payment_intent'] ?? ''));
+        $res = order_fulfil($o, 'stripe', $pi !== '' ? $pi : $sid, $amount, $currency,
+            json_encode($session, JSON_UNESCAPED_SLASHES) ?: '', 'card');
+        return $res['ok'] ? ['ok' => true, 'status' => 'paid'] : ['ok' => false, 'status' => 'review'];
+    }
+    if ($state === 'expired' && in_array($o['status'], ORDER_OPEN, true)) {
+        order_update((int)$o['id'], ['status' => 'failed', 'failure_reason' => 'The card payment page expired.']);
+        return ['ok' => false, 'status' => 'failed'];
+    }
+    if ($state === 'complete' && $pay === 'unpaid' && $o['status'] === 'pending') {
+        order_update((int)$o['id'], ['status' => 'approved', 'failure_reason' => 'Waiting for the card payment to settle.']);
+        return ['ok' => true, 'status' => 'approved'];
+    }
+    return ['ok' => true, 'status' => (string)$o['status']];
+}
+
+/**
+ * Check a Stripe-Signature header ("t=...,v1=...,v1=...") over the raw body.
+ * Rejects anything older than $tolerance seconds, which stops replays.
+ */
+function stripe_signature_ok(string $raw, string $header, string $secret, int $tolerance = 300): bool
+{
+    if ($secret === '' || $header === '') {
+        return false;
+    }
+    $t = 0;
+    $sigs = [];
+    foreach (explode(',', $header) as $part) {
+        $kv = explode('=', trim($part), 2);
+        if (count($kv) !== 2) {
+            continue;
+        }
+        if ($kv[0] === 't' && ctype_digit($kv[1])) {
+            $t = (int)$kv[1];
+        } elseif ($kv[0] === 'v1') {
+            $sigs[] = strtolower($kv[1]);
+        }
+    }
+    if ($t === 0 || !$sigs || abs(time() - $t) > $tolerance) {
+        return false;
+    }
+    $expected = hash_hmac('sha256', $t . '.' . $raw, $secret);
+    foreach ($sigs as $s) {
+        if (hash_equals($expected, $s)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** Payment methods the checkout may offer right now. */
 function checkout_methods(): array
 {
     $m = [];
+    // v8: VISA / Mastercard first - the method most buyers look for.
+    if (stripe_ready()) {
+        $m['card'] = ['label' => 'Credit or debit card', 'kind' => 'redirect', 'cards' => true,
+                      'hint' => 'VISA or Mastercard on a secure Stripe payment page. We never see or store card details.'];
+    }
     if (paypal_ready()) {
-        $m['paypal'] = ['label' => 'PayPal or card', 'kind' => 'paypal',
-                        'hint' => 'Pay securely with PayPal. Cards are handled by PayPal; we never see card details.'];
+        $m['paypal'] = ['label' => isset($m['card']) ? 'PayPal' : 'PayPal or card', 'kind' => 'paypal',
+                        'cards' => !isset($m['card']),
+                        'hint' => isset($m['card'])
+                            ? 'Pay with your PayPal account. We never see card details.'
+                            : 'Pay with PayPal, or with a VISA / Mastercard through PayPal without an account. We never see card details.'];
     }
     if (setting_bool('crypto_enabled')) {
         if (crypto_gateway() !== 'manual' && (string)setting('crypto_api_key', '') !== '') {

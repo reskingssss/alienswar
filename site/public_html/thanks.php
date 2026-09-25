@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/includes/status_page.php';
+require_once __DIR__ . '/includes/ratelimit.php';
 
 $order = status_load_order();
 if ($order === null) {
@@ -13,6 +14,18 @@ if ($order === null) {
     exit;
 }
 
+// v8: back from the card page -> ask Stripe straight away, so the key is on
+// this page at once instead of after the webhook.
+if ($order['provider'] === 'stripe' && !$order['license_id'] && in_array($order['status'], ORDER_OPEN, true)
+    && stripe_ready() && rate_ok('stripe_sync', (string)$order['ref'], 1, 4)) {
+    try {
+        stripe_sync_order($order);
+        $order = order_by_id((int)$order['id']) ?: $order;
+    } catch (Throwable $e) {
+        error_log('[mavelylink] stripe_sync_order: ' . $e->getMessage());
+    }
+}
+$cardReturn = $order['provider'] === 'stripe' && get_str('paid', 10) === 'card';
 $lic = $order['license_id'] ? license_by_id((int)$order['license_id']) : null;
 $status = (string)$order['status'];
 $paid = $status === 'paid' && $lic;
@@ -108,6 +121,14 @@ page_top(($paid ? 'Your licence key' : 'Your order') . ' — ' . SITE_NAME,
        contact <?= e(SUPPORT_EMAIL) ?> with your order reference.</p></div>
   <p class="muted small" style="margin-top:16px">This page updates by itself once your payment is confirmed.</p>
 
+<?php elseif (($cardReturn && $status === 'pending') || ($order['provider'] === 'stripe' && $status === 'approved')): ?>
+  <?= status_badge('wait') ?>
+  <h1>Confirming your card payment</h1>
+  <p class="muted">Thanks — the card payment for order <b style="color:var(--ink)"><?= e($order['ref']) ?></b> is being
+     confirmed with the bank. This normally takes a few seconds. Your licence key will appear here and is also emailed to
+     <b style="color:var(--ink)"><?= e($order['email']) ?></b>.</p>
+  <p class="muted small" style="margin-top:16px">This page updates by itself once your payment is confirmed.</p>
+
 <?php elseif (in_array($status, ['pending'], true)): ?>
   <?= status_badge('wait') ?>
   <h1>Waiting for payment</h1>
@@ -176,14 +197,14 @@ page_top(($paid ? 'Your licence key' : 'Your order') . ' — ' . SITE_NAME,
   }
 
   // poll for confirmation while pending, then reload to show the key
-  if (status === 'pending' || status === 'awaiting_verification') {
+  if (status === 'pending' || status === 'awaiting_verification' || status === 'approved') {
     var tries = 0;
     var timer = setInterval(function () {
       tries++;
       if (tries > 120) { clearInterval(timer); return; }   // ~10 min
       fetch('/api/v1/order.php?ref=' + encodeURIComponent(ref) + '&t=' + encodeURIComponent(t))
         .then(function (r) { return r.json(); }).then(function (d) {
-          if (d.ok && d.status === 'paid') { clearInterval(timer); window.location.reload(); }
+          if (d.ok && d.status !== status) { clearInterval(timer); window.location.reload(); }
         }).catch(function () {});
     }, 5000);
   }

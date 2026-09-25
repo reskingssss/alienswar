@@ -183,7 +183,9 @@ function layout_top(string $title, string $subtitle = ''): void
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <title><?= e($title) ?> · <?= e(SITE_NAME) ?> Admin</title>
-<link rel="stylesheet" href="../assets/css/admin.css?v=7">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../assets/css/admin.css?v=8">
+<script src="../assets/js/theme.js?v=8"></script>
 </head><body>
 <a class="skip" href="#main">Skip to content</a>
 <input type="checkbox" id="navtoggle" hidden>
@@ -213,6 +215,10 @@ function layout_top(string $title, string $subtitle = ''): void
       <a class="status-pill <?= $appOn ? 'is-on' : 'is-off' ?>" href="status.php">
         Application: <b><?= $appOn ? 'ON' : 'OFF' ?></b>
       </a>
+      <button type="button" class="theme-toggle" data-theme-toggle aria-pressed="false" aria-label="Dark mode">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
     </header>
     <main id="main" tabindex="-1">
 <?php
@@ -246,6 +252,6 @@ function layout_bottom(): void
     </div>
   </form>
 </dialog>
-<script src="../assets/js/admin.js?v=7"></script>
+<script src="../assets/js/admin.js?v=8"></script>
 </body></html>
 <?php }

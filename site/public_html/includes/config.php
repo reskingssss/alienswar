@@ -58,3 +58,4 @@ const TOKEN_RENEW_GRACE_DAYS = 45;     // an expired genuine session token may s
 const MAIL_FROM              = '';     // e.g. 'MavelyLink <no-reply@your-domain.com>'; empty = SUPPORT_EMAIL
 const PAYPAL_API_BASE_OVERRIDE = '';   // testing only - leave empty
 const CRYPTO_API_BASE_OVERRIDE = '';   // testing only - leave empty
+const STRIPE_API_BASE_OVERRIDE = '';   // testing only - leave empty
